@@ -388,15 +388,15 @@ def generate_dataset_optimized_fixed(max_bits: int, output_dir: str = "data",
         estimated_uncompressed_mb = total_pairs * 150 / (1024**2)  # Rough estimate
         compression_ratio = estimated_uncompressed_mb / file_size_mb if file_size_mb > 0 else 0
 
-        print(f"✅ Dataset saved successfully!")
+        print(f"SUCCESS: Dataset saved successfully!")
         print(f"Rows: {len(dataset):,}")
         print(f"File size: {file_size_mb:.2f} MB")
         print(f"Compression ratio: {compression_ratio:.1f}:1")
         print(f"Compression efficiency: {((1 - file_size_mb/estimated_uncompressed_mb) * 100):.1f}%")
         print(f"Final memory usage: {get_memory_usage()}")
     except OSError as e:
-        print(f"⚠️ Warning: Could not get file size: {e}")
-        print(f"✅ Dataset saved successfully!")
+        print(f"WARNING: Could not get file size: {e}")
+        print(f"SUCCESS: Dataset saved successfully!")
         print(f"Rows: {len(dataset):,}")
         print(f"Final memory usage: {get_memory_usage()}")
 
@@ -488,10 +488,10 @@ def main():
             compression_level=args.compression_level
         )
     except KeyboardInterrupt:
-        print("\n⏹️ Interrupted by user.")
+        print("\nINTERRUPTED: User interrupted execution.")
         sys.exit(1)
     except Exception as e:
-        print(f"❌ Error: {e}")
+        print(f"ERROR: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)
