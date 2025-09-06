@@ -300,16 +300,21 @@ def compute_products_and_features(prime_pairs: List[Tuple[int, int]], primes: np
         print(f"  Warning: Products may exceed uint64 range ({max_product:,} > {uint64_max:,})")
         print(f"  Using Python arbitrary precision integers for safety")
     
-    # Extract products using Python integers to avoid overflow
-    # Convert to Python int first, then to appropriate numpy type
+    # Extract products with proper type handling to avoid overflow warnings
     products_list = []
     for i, j in prime_pairs:
-        # Use Python integers for multiplication to avoid overflow
-        product = int(primes[i]) * int(primes[j])
+        # Ensure we're using Python integers for the multiplication
+        prime_i = int(primes[i])
+        prime_j = int(primes[j])
+        product = prime_i * prime_j
         products_list.append(product)
     
-    # Convert to numpy array with object dtype to handle large integers
-    products = np.array(products_list, dtype=object)
+    # Use uint64 for 16-bit (should fit), but check for potential issues
+    try:
+        products = np.array(products_list, dtype=np.uint64)
+    except OverflowError:
+        print("  Overflow detected, using arbitrary precision integers")
+        products = np.array(products_list, dtype=object)
     
     # Decimal representations
     decimals = np.array([f'{p:0{product_dec_len}d}' for p in products])
