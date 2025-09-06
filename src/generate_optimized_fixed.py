@@ -32,6 +32,23 @@ try:
 except ImportError:
     CUPY_AVAILABLE = False
 
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
+
+
+def get_memory_usage() -> str:
+    """Get current memory usage if psutil is available."""
+    if not PSUTIL_AVAILABLE:
+        return "Memory monitoring unavailable (install psutil)"
+
+    process = psutil.Process()
+    memory_info = process.memory_info()
+    memory_mb = memory_info.rss / (1024**2)
+    return ".1f"
+
 
 # ============================================================================
 # OPTIMIZED PRIME GENERATION (SAME AS BEFORE)
@@ -44,7 +61,7 @@ if NUMBA_AVAILABLE:
         if limit < 2:
             return np.array([], dtype=np.int32)
         
-        prime = np.ones(limit + 1, dtype=np.bool_)
+        prime = np.ones(limit + 1, dtype=bool)
         prime[0] = prime[1] = False
         
         sqrt_limit = int(np.sqrt(limit)) + 1
@@ -277,16 +294,18 @@ def generate_chunk_pairs(args):
 # MAIN OPTIMIZED GENERATION FUNCTION
 # ============================================================================
 
-def generate_dataset_optimized_fixed(max_bits: int, output_dir: str = "data", 
-                                   num_workers: int = None, batch_size: int = 100000,
+def generate_dataset_optimized_fixed(max_bits: int, output_dir: str = "data",
+                                   repo_name: str = None, num_workers: int = None,
                                    compression_level: int = 22):
     """Fixed optimized dataset generation with proper parallelization."""
     print(f"🚀 Generating OPTIMIZED dataset for {max_bits}-bit prime pairs...")
+    print(f"Target repository: {repo_name}")
     print(f"Maximum compression level: {compression_level}")
     
     # Show optimization status
     print(f"Numba JIT: {'✓' if NUMBA_AVAILABLE else '❌'}")
     print(f"Multiprocessing: ✓")
+    print(f"Memory monitoring: {'✓' if PSUTIL_AVAILABLE else '❌'}")
     
     # Set up workers
     if num_workers is None:
@@ -299,6 +318,7 @@ def generate_dataset_optimized_fixed(max_bits: int, output_dir: str = "data",
     primes = fast_sieve_of_eratosthenes(max_factor)
     num_primes = len(primes)
     print(f"Found {num_primes} prime numbers up to {max_factor}")
+    print(f"Memory usage: {get_memory_usage()}")
     
     # Calculate total pairs
     total_pairs = num_primes * (num_primes + 1) // 2
@@ -307,6 +327,7 @@ def generate_dataset_optimized_fixed(max_bits: int, output_dir: str = "data",
     # Pre-compute all prime features (vectorized)
     print("Computing prime features...")
     prime_features = compute_prime_features_vectorized(primes, max_bits)
+    print(f"Memory usage: {get_memory_usage()}")
     
     # Create dataset features schema
     features = create_dataset_features_optimized_fixed(max_bits)
@@ -341,22 +362,36 @@ def generate_dataset_optimized_fixed(max_bits: int, output_dir: str = "data",
     dataset = Dataset.from_generator(parallel_data_generator, features=features)
     
     # Save with maximum compression
-    os.makedirs(output_dir, exist_ok=True)
-    output_path = os.path.join(output_dir, f"prime_products_{max_bits}bit_optimized_fixed.parquet")
-    
-    print(f"Saving to {output_path} with compression level {compression_level}...")
-    dataset.to_parquet(output_path, compression="zstd", compression_level=compression_level)
+    try:
+        os.makedirs(output_dir, exist_ok=True)
+        output_path = os.path.join(output_dir, f"prime_products_{max_bits}bit_optimized_fixed.parquet")
+
+        print(f"Saving to {output_path} with compression level {compression_level}...")
+        dataset.to_parquet(output_path, compression="zstd", compression_level=compression_level)
+    except OSError as e:
+        print(f"❌ Error creating output directory or file: {e}")
+        raise
+    except Exception as e:
+        print(f"❌ Error saving dataset: {e}")
+        raise
     
     # Show results
-    file_size_mb = os.path.getsize(output_path) / (1024**2)
-    estimated_uncompressed_mb = total_pairs * 150 / (1024**2)  # Rough estimate
-    compression_ratio = estimated_uncompressed_mb / file_size_mb if file_size_mb > 0 else 0
-    
-    print(f"✅ Dataset saved successfully!")
-    print(f"Rows: {len(dataset):,}")
-    print(f"File size: {file_size_mb:.2f} MB")
-    print(f"Compression ratio: {compression_ratio:.1f}:1")
-    print(f"Compression efficiency: {((1 - file_size_mb/estimated_uncompressed_mb) * 100):.1f}%")
+    try:
+        file_size_mb = os.path.getsize(output_path) / (1024**2)
+        estimated_uncompressed_mb = total_pairs * 150 / (1024**2)  # Rough estimate
+        compression_ratio = estimated_uncompressed_mb / file_size_mb if file_size_mb > 0 else 0
+
+        print(f"✅ Dataset saved successfully!")
+        print(f"Rows: {len(dataset):,}")
+        print(f"File size: {file_size_mb:.2f} MB")
+        print(f"Compression ratio: {compression_ratio:.1f}:1")
+        print(f"Compression efficiency: {((1 - file_size_mb/estimated_uncompressed_mb) * 100):.1f}%")
+        print(f"Final memory usage: {get_memory_usage()}")
+    except OSError as e:
+        print(f"⚠️ Warning: Could not get file size: {e}")
+        print(f"✅ Dataset saved successfully!")
+        print(f"Rows: {len(dataset):,}")
+        print(f"Final memory usage: {get_memory_usage()}")
 
 
 def create_dataset_features_optimized_fixed(max_bits: int) -> Features:
@@ -400,13 +435,25 @@ def main():
     parser = argparse.ArgumentParser(description="FIXED OPTIMIZED Synthetic Math Dataset Generator")
     parser.add_argument("max_bits", type=int, help="Maximum number of bits")
     parser.add_argument("--output-dir", type=str, default="data", help="Output directory")
+    parser.add_argument("--repo-name", type=str, required=True, help="Name of the repository where dataset should be pushed")
     parser.add_argument("--workers", type=int, default=None, help="Number of worker processes")
-    parser.add_argument("--batch-size", type=int, default=100000, help="Processing batch size")
-    parser.add_argument("--compression-level", type=int, default=22, 
+    parser.add_argument("--compression-level", type=int, default=22,
                        help="Zstd compression level (1-22, default: 22 for maximum compression)")
     
     args = parser.parse_args()
-    
+
+    # Validate output directory
+    if not os.path.exists(args.output_dir):
+        try:
+            os.makedirs(args.output_dir, exist_ok=True)
+            print(f"Created output directory: {args.output_dir}")
+        except OSError as e:
+            print(f"Error: Cannot create output directory {args.output_dir}: {e}")
+            sys.exit(1)
+    elif not os.access(args.output_dir, os.W_OK):
+        print(f"Error: Output directory {args.output_dir} is not writable")
+        sys.exit(1)
+
     if args.max_bits < 1 or args.max_bits > 32:
         print("Error: max_bits must be between 1 and 32")
         sys.exit(1)
@@ -429,8 +476,8 @@ def main():
         generate_dataset_optimized_fixed(
             max_bits=args.max_bits,
             output_dir=args.output_dir,
+            repo_name=args.repo_name,
             num_workers=args.workers,
-            batch_size=args.batch_size,
             compression_level=args.compression_level
         )
     except KeyboardInterrupt:
