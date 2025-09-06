@@ -88,8 +88,32 @@ if NUMBA_AVAILABLE:
                     bits_array[i, max_bits - 1 - bit_pos] = 1
                     popcount[i] += 1
 
-            # MSB index
-            msb_index[i] = num.bit_length() - 1 if num > 0 else 0
+            # MSB index - Optimized Numba-compatible bit length calculation
+            if num > 0:
+                # Fast bit length using bit manipulation
+                temp_num = num
+                bit_len = 0
+                # Optimized: use powers of 2 to find bit length faster
+                if temp_num >= (1 << 16):
+                    bit_len += 16
+                    temp_num >>= 16
+                if temp_num >= (1 << 8):
+                    bit_len += 8
+                    temp_num >>= 8
+                if temp_num >= (1 << 4):
+                    bit_len += 4
+                    temp_num >>= 4
+                if temp_num >= (1 << 2):
+                    bit_len += 2
+                    temp_num >>= 2
+                if temp_num >= (1 << 1):
+                    bit_len += 1
+                    temp_num >>= 1
+                if temp_num >= 1:
+                    bit_len += 1
+                msb_index[i] = bit_len - 1
+            else:
+                msb_index[i] = 0
 else:
     # Fallback non-JIT versions
     def fast_sieve_of_eratosthenes(max_num: int) -> np.ndarray:
