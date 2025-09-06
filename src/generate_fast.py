@@ -341,7 +341,8 @@ def upload_to_huggingface(output_path: str, repo_name: str, max_bits: int, is_pr
 def generate_dataset_fast(max_bits: int, output_dir: str = "data",
                          repo_name: str = None, num_workers: int = None,
                          compression_level: int = 22, no_upload: bool = False, 
-                         is_public: bool = False, max_memory_gb: float = None):
+                         is_public: bool = False, max_memory_gb: float = None,
+                         force_chunk_size: int = None):
     """FAST dataset generation - no multiprocessing bottlenecks."""
     
     print(f"🚀 FAST Synthetic Math Dataset Generator")
@@ -397,23 +398,40 @@ def generate_dataset_fast(max_bits: int, output_dir: str = "data",
     # Split work into chunks - optimize for memory usage
     if max_memory_gb is not None:
         # User-specified memory limit
-        available_memory_gb = max_memory_gb
-        worker_memory_gb = available_memory_gb / num_workers
-        print(f"Memory limit: {available_memory_gb:.1f}GB total, {worker_memory_gb:.2f}GB per worker")
+        # Reserve 20% for overhead (OS, main process, etc.)
+        overhead_factor = 0.8
+        available_memory_gb = max_memory_gb * overhead_factor
+        # Account for the fact that multiple chunks might be in flight
+        chunks_in_flight = min(num_workers * 2, 50)  # Workers + queue
+        worker_memory_gb = available_memory_gb / chunks_in_flight
+        print(f"Memory limit: {max_memory_gb:.1f}GB specified")
+        print(f"Available after overhead: {available_memory_gb:.1f}GB")
+        print(f"Per-chunk memory budget: {worker_memory_gb:.2f}GB ({chunks_in_flight} chunks in flight)")
     else:
-        # Auto-detect: conservative estimate based on workers
-        worker_memory_gb = 2.0  # Default 2GB per worker
+        # Auto-detect: very conservative estimate
+        worker_memory_gb = 0.5  # Default 0.5GB per chunk
         available_memory_gb = worker_memory_gb * num_workers
-        print(f"Auto-detected memory: {available_memory_gb:.1f}GB total, {worker_memory_gb:.2f}GB per worker")
+        print(f"Auto-detected memory: {available_memory_gb:.1f}GB total, {worker_memory_gb:.2f}GB per chunk")
     
     # Calculate optimal chunk size based on memory
-    bytes_per_record = 400  # Rough estimate including all fields
-    target_records_per_chunk = int(worker_memory_gb * 1024**3 / bytes_per_record)
+    # Much more conservative estimate accounting for Python overhead
+    bytes_per_record = 1200  # More realistic with Python object overhead
+    safety_factor = 0.5  # Use only 50% of calculated limit
+    target_records_per_chunk = int(worker_memory_gb * 1024**3 / bytes_per_record * safety_factor)
     
-    pairs_per_chunk = min(
-        max(10000, total_pairs // (num_workers * 4)),  # Original logic
-        target_records_per_chunk  # Memory-based limit
-    )
+    if force_chunk_size is not None:
+        # User forced a specific chunk size
+        pairs_per_chunk = force_chunk_size
+        estimated_memory_per_chunk = pairs_per_chunk * bytes_per_record / (1024**3)
+        print(f"⚠️  Using forced chunk size: {pairs_per_chunk:,} pairs per chunk")
+        print(f"⚠️  Estimated {estimated_memory_per_chunk:.2f}GB per chunk")
+        if estimated_memory_per_chunk > 4:
+            print(f"⚠️  WARNING: Large chunk size may cause OOM!")
+    else:
+        pairs_per_chunk = min(
+            max(10000, total_pairs // (num_workers * 4)),  # Original logic
+            target_records_per_chunk  # Memory-based limit
+        )
     
     print(f"Creating work chunks ({pairs_per_chunk:,} pairs per chunk)...")
     
@@ -493,6 +511,8 @@ def main():
     parser.add_argument("--test", action="store_true", help="Run a quick test with small dataset (8-bit)")
     parser.add_argument("--max-memory", type=float, default=None, 
                        help="Maximum memory to use in GB (default: auto-detect based on workers)")
+    parser.add_argument("--chunk-size", type=int, default=None,
+                       help="Force specific chunk size (pairs per chunk). Overrides memory calculations.")
 
     args = parser.parse_args()
 
@@ -544,7 +564,8 @@ def main():
             compression_level=args.compression_level,
             no_upload=args.no_upload,
             is_public=args.public,
-            max_memory_gb=args.max_memory
+            max_memory_gb=args.max_memory,
+            force_chunk_size=args.chunk_size
         )
     except KeyboardInterrupt:
         print("\n❌ Interrupted by user")
