@@ -1,0 +1,8 @@
+# Core dependencies for synthetic math dataset generator
+numpy>=1.21.0
+datasets>=2.14.0
+pyarrow>=13.0.0
+tqdm>=4.65.0
+
+# Optional: for PyTorch integration
+torch>=1.9.0
