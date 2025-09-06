@@ -394,8 +394,16 @@ def generate_dataset_fast(max_bits: int, output_dir: str = "data",
     temp_dir = os.path.join(output_dir, f"temp_chunks_{max_bits}bit")
     os.makedirs(temp_dir, exist_ok=True)
     
-    # Split work into chunks
-    pairs_per_chunk = max(10000, total_pairs // (num_workers * 4))
+    # Split work into chunks - optimize for memory usage
+    # Target ~1-2GB per chunk to avoid OOM on large datasets
+    target_memory_per_chunk_gb = 2
+    bytes_per_record = 400  # Rough estimate including all fields
+    target_records_per_chunk = int(target_memory_per_chunk_gb * 1024**3 / bytes_per_record)
+    
+    pairs_per_chunk = min(
+        max(10000, total_pairs // (num_workers * 4)),  # Original logic
+        target_records_per_chunk  # Memory-based limit
+    )
     
     print(f"Creating work chunks ({pairs_per_chunk:,} pairs per chunk)...")
     
