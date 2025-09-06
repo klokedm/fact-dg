@@ -277,8 +277,8 @@ def generate_chunk_fast(args) -> str:
     return chunk_file
 
 def merge_parquet_files(chunk_files: List[str], output_path: str, compression_level: int = 22):
-    """Efficiently merge parquet chunk files."""
-    print("Merging parquet chunks...")
+    """Stream-merge parquet files without loading all into memory."""
+    print("Merging parquet chunks (streaming mode)...")
     
     # Filter out None values (empty chunks)
     valid_chunks = [f for f in chunk_files if f is not None and os.path.exists(f)]
@@ -286,23 +286,45 @@ def merge_parquet_files(chunk_files: List[str], output_path: str, compression_le
     if not valid_chunks:
         raise ValueError("No valid chunk files to merge")
     
-    # Read all chunks and combine
-    tables = []
-    for chunk_file in tqdm(valid_chunks, desc="Reading chunks"):
-        table = pq.read_table(chunk_file)
-        tables.append(table)
+    # Get schema from first chunk
+    first_table = pq.read_table(valid_chunks[0])
+    schema = first_table.schema
     
-    # Concatenate all tables
-    print("Combining tables...")
-    combined_table = pa.concat_tables(tables)
+    # Create parquet writer
+    writer = pq.ParquetWriter(
+        output_path, 
+        schema,
+        compression='zstd',
+        compression_level=compression_level,
+        use_dictionary=True,
+        data_page_size=1024*1024,  # 1MB pages
+        write_batch_size=50000     # Write in batches
+    )
     
-    # Write final file
-    print(f"Writing final parquet file: {output_path}")
-    pq.write_table(combined_table, output_path, compression='zstd', 
-                   compression_level=compression_level)
+    # Stream chunks to output file
+    total_rows = 0
+    with tqdm(total=len(valid_chunks), desc="Streaming chunks to output") as pbar:
+        for chunk_file in valid_chunks:
+            # Read one chunk at a time
+            table = pq.read_table(chunk_file)
+            
+            # Write it immediately (PyArrow handles batching internally)
+            writer.write_table(table)
+            total_rows += len(table)
+            
+            # Free memory immediately
+            del table
+            
+            pbar.update(1)
+            pbar.set_postfix({"Total rows": f"{total_rows:,}"})
+    
+    # Close writer
+    writer.close()
+    print(f"✅ Merged {total_rows:,} rows into {output_path}")
     
     # Clean up chunk files
-    for chunk_file in valid_chunks:
+    print("Cleaning up temporary files...")
+    for chunk_file in tqdm(valid_chunks, desc="Removing chunks"):
         try:
             os.remove(chunk_file)
         except:
