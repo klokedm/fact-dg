@@ -59,77 +59,61 @@ if NUMBA_AVAILABLE:
     def fast_sieve_of_eratosthenes(max_num: int) -> np.ndarray:
         """Optimized sieve using Numba JIT."""
         if max_num < 2:
-            return np.array([], dtype=np.int32)
-        
-        sieve = np.ones(max_num + 1, dtype=np.bool_)
+            # Create a properly typed empty array for Numba
+            return np.empty(0, dtype=np.int32)
+
+        sieve = np.ones(max_num + 1, dtype=np.bool8)
         sieve[0] = sieve[1] = False
-        
+
         for i in range(2, int(math.sqrt(max_num)) + 1):
             if sieve[i]:
                 for j in prange(i*i, max_num + 1, i):
                     sieve[j] = False
-        
+
         return np.where(sieve)[0].astype(np.int32)
 
     @jit(nopython=True)
-    def compute_features_fast(numbers: np.ndarray, max_bits: int) -> Dict:
-        """Fast vectorized feature computation."""
+    def compute_features_fast(numbers: np.ndarray, max_bits: int, bits_array: np.ndarray, popcount: np.ndarray, msb_index: np.ndarray):
+        """Fast vectorized feature computation - modifies arrays in place."""
         n = len(numbers)
-        
-        # Pre-allocate arrays
-        bits_array = np.zeros((n, max_bits), dtype=np.uint8)
-        popcount = np.zeros(n, dtype=np.uint8)
-        msb_index = np.zeros(n, dtype=np.uint8)
-        
+
         for i in prange(n):
             num = numbers[i]
-            
+
             # Convert to binary
             for bit_pos in range(max_bits):
                 if num & (1 << bit_pos):
                     bits_array[i, max_bits - 1 - bit_pos] = 1
                     popcount[i] += 1
-            
+
             # MSB index
             msb_index[i] = num.bit_length() - 1 if num > 0 else 0
-            
-        return {
-            'bits': bits_array,
-            'popcount': popcount,
-            'msb_index': msb_index
-        }
 else:
     # Fallback non-JIT versions
     def fast_sieve_of_eratosthenes(max_num: int) -> np.ndarray:
         if max_num < 2:
             return np.array([], dtype=np.int32)
-        
+
         sieve = np.ones(max_num + 1, dtype=bool)
         sieve[0] = sieve[1] = False
-        
+
         for i in range(2, int(math.sqrt(max_num)) + 1):
             if sieve[i]:
                 sieve[i*i::i] = False
-        
+
         return np.where(sieve)[0].astype(np.int32)
 
-    def compute_features_fast(numbers: np.ndarray, max_bits: int) -> Dict:
+    def compute_features_fast(numbers: np.ndarray, max_bits: int, bits_array: np.ndarray, popcount: np.ndarray, msb_index: np.ndarray):
+        """Fallback non-JIT version - modifies arrays in place."""
         n = len(numbers)
-        bits_array = np.zeros((n, max_bits), dtype=np.uint8)
-        
+
         for i, num in enumerate(numbers):
             bit_str = format(num, f'0{max_bits}b')
             bits_array[i] = [int(b) for b in bit_str]
-        
-        popcount = np.sum(bits_array, axis=1, dtype=np.uint8)
-        msb_index = np.array([num.bit_length() - 1 if num > 0 else 0 
-                             for num in numbers], dtype=np.uint8)
-        
-        return {
-            'bits': bits_array,
-            'popcount': popcount,
-            'msb_index': msb_index
-        }
+
+        popcount[:] = np.sum(bits_array, axis=1, dtype=np.uint8)
+        msb_index[:] = np.array([num.bit_length() - 1 if num > 0 else 0
+                                for num in numbers], dtype=np.uint8)
 
 def create_parquet_schema(max_bits: int) -> pa.Schema:
     """Create Arrow schema for parquet files."""
@@ -341,7 +325,18 @@ def generate_dataset_fast(max_bits: int, output_dir: str = "data",
     
     # Compute prime features once
     print("Computing prime features...")
-    prime_features = compute_features_fast(primes, max_bits)
+    n_primes = len(primes)
+    bits_array = np.zeros((n_primes, max_bits), dtype=np.uint8)
+    popcount_array = np.zeros(n_primes, dtype=np.uint8)
+    msb_index_array = np.zeros(n_primes, dtype=np.uint8)
+
+    compute_features_fast(primes, max_bits, bits_array, popcount_array, msb_index_array)
+
+    prime_features = {
+        'bits': bits_array,
+        'popcount': popcount_array,
+        'msb_index': msb_index_array
+    }
     print(f"Memory usage: {get_memory_usage()}")
     
     # Create output directory
