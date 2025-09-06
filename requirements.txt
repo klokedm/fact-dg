@@ -4,5 +4,12 @@ datasets>=2.14.0
 pyarrow>=13.0.0
 tqdm>=4.65.0
 
+# Performance optimizations (highly recommended)
+numba>=0.57.0  # JIT compilation - massive speedup
+cupy-cuda12x>=12.0.0  # GPU acceleration (optional, requires CUDA)
+
+# Alternative parallel processing
+ray[default]>=2.0.0  # Distributed computing (optional)
+
 # Optional: for PyTorch integration
 torch>=1.9.0
