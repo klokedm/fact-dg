@@ -64,13 +64,13 @@ if NUMBA_AVAILABLE:
             # Create a properly typed empty array for Numba
             return np.empty(0, dtype=np.int32)
 
-        sieve = np.ones(max_num + 1, dtype=bool)
-        sieve[0] = sieve[1] = False
+        sieve = np.ones(max_num + 1, dtype=np.uint8)
+        sieve[0] = sieve[1] = 0
 
         for i in range(2, int(math.sqrt(max_num)) + 1):
             if sieve[i]:
                 for j in prange(i*i, max_num + 1, i):
-                    sieve[j] = False
+                    sieve[j] = 0
 
         return np.where(sieve)[0].astype(np.int32)
 
