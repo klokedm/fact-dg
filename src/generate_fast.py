@@ -208,11 +208,14 @@ def generate_chunk_fast(args) -> str:
     records = []
     
     for i, j in chunk_pairs:
-        # Get prime values
-        p1, p2 = primes[i], primes[j]
+        # Get prime values - convert to Python int to avoid overflow
+        p1, p2 = int(primes[i]), int(primes[j])
         product = p1 * p2
         
-        # Compute product features
+        # Compute product features - ensure positive value
+        if product < 0:
+            raise ValueError(f"Negative product detected: {p1} * {p2} = {product}")
+        
         product_bits = format(product, f'0{max_bits*2}b')
         product_bit_array = [int(b) for b in product_bits]
         product_popcount = sum(product_bit_array)
