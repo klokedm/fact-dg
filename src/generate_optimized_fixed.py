@@ -153,7 +153,7 @@ else:
         return result
     
     def fast_popcount_batch(numbers: np.ndarray) -> np.ndarray:
-        return np.array([bin(x).count('1') for x in numbers], dtype=np.uint8)
+        return np.array([bin(int(x)).count('1') for x in numbers], dtype=np.uint8)
     
     def fast_msb_index_batch(numbers: np.ndarray) -> np.ndarray:
         return np.array([int(x).bit_length() - 1 if x > 0 else 0 for x in numbers], dtype=np.uint8)
