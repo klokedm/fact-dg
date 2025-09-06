@@ -69,6 +69,40 @@ def calc_bit_length(num) -> int:
     # Use Python's built-in bit_length for regular integers
     return num.bit_length()
 
+def pair_index_to_ij(pair_idx: int, num_primes: int) -> tuple:
+    """
+    Convert a linear pair index to (i,j) coordinates efficiently.
+    
+    For pairs where i <= j, we can calculate this mathematically:
+    - Row i has (num_primes - i) pairs
+    - We find which row the index falls into, then the column
+    """
+    if pair_idx < 0:
+        raise ValueError(f"Invalid pair index: {pair_idx}")
+    
+    # Find row i using quadratic formula
+    # pair_idx = i * num_primes - i * (i + 1) / 2
+    # Solving for i: i = num_primes - 0.5 - sqrt((num_primes - 0.5)^2 - 2*pair_idx)
+    discriminant = (num_primes - 0.5) ** 2 - 2 * pair_idx
+    if discriminant < 0:
+        raise ValueError(f"Pair index {pair_idx} out of range")
+    
+    i = int(num_primes - 0.5 - discriminant ** 0.5)
+    
+    # Calculate j from the remaining offset in row i
+    pairs_before_row_i = i * num_primes - i * (i + 1) // 2
+    j = i + (pair_idx - pairs_before_row_i)
+    
+    if j >= num_primes:
+        raise ValueError(f"Calculated j={j} >= num_primes={num_primes}")
+    
+    return i, j
+
+def generate_pairs_for_range(start_idx: int, end_idx: int, num_primes: int):
+    """Generate (i,j) pairs for a range of indices without materializing all pairs."""
+    for pair_idx in range(start_idx, end_idx):
+        yield pair_index_to_ij(pair_idx, num_primes)
+
 # Import optimized functions from the original script
 if NUMBA_AVAILABLE:
     @jit(nopython=True)
@@ -199,15 +233,21 @@ def generate_chunk_fast(args) -> str:
     FAST worker function - writes directly to parquet file.
     Returns the path to the generated chunk file.
     """
-    chunk_pairs, primes, prime_features, max_bits, chunk_id, temp_dir = args
+    start_idx, end_idx, primes, prime_features, max_bits, chunk_id, temp_dir, num_primes, lazy_features = args
     
-    if not chunk_pairs:
+    if start_idx >= end_idx:
         return None
+    
+    # For lazy features, we'll compute them on-demand per pair (simpler but trades CPU for memory)
+    # This avoids the complexity of pre-scanning all pairs in the chunk
+    chunk_prime_features = prime_features
+    index_map = None
     
     # Generate records for this chunk
     records = []
     
-    for i, j in chunk_pairs:
+    # Generate pairs on-the-fly from index range
+    for i, j in generate_pairs_for_range(start_idx, end_idx, num_primes):
         # Get prime values - convert to Python int to avoid overflow
         p1, p2 = int(primes[i]), int(primes[j])
         product = p1 * p2
@@ -229,22 +269,44 @@ def generate_chunk_fast(args) -> str:
         a_bits = format(a, f'0{max_bits*2}b')
         b_bits = format(b, f'0{max_bits*2}b')
         
+        # Compute factor features (on-demand if lazy, pre-computed otherwise)
+        if lazy_features:
+            # Compute features on-demand (saves memory, uses more CPU)
+            p1_bits = format(p1, f'0{max_bits}b')
+            p1_bit_array = [int(b) for b in p1_bits]
+            p1_popcount = sum(p1_bit_array)
+            p1_msb_index = calc_bit_length(p1) - 1 if p1 > 0 else 0
+            
+            p2_bits = format(p2, f'0{max_bits}b')
+            p2_bit_array = [int(b) for b in p2_bits]
+            p2_popcount = sum(p2_bit_array)
+            p2_msb_index = calc_bit_length(p2) - 1 if p2 > 0 else 0
+        else:
+            # Use pre-computed features
+            p1_bit_array = chunk_prime_features['bits'][i].tolist()
+            p1_popcount = int(chunk_prime_features['popcount'][i])
+            p1_msb_index = int(chunk_prime_features['msb_index'][i])
+            
+            p2_bit_array = chunk_prime_features['bits'][j].tolist()
+            p2_popcount = int(chunk_prime_features['popcount'][j])
+            p2_msb_index = int(chunk_prime_features['msb_index'][j])
+        
         record = {
             # Factor 1 features
             'factor1_dec': str(p1),
-            'factor1_bits': prime_features['bits'][i].tolist(),
+            'factor1_bits': p1_bit_array,
             'factor1_is_prime': True,
             'factor1_is_odd': bool(p1 % 2),
-            'factor1_popcount': int(prime_features['popcount'][i]),
-            'factor1_msb_index': int(prime_features['msb_index'][i]),
+            'factor1_popcount': p1_popcount,
+            'factor1_msb_index': p1_msb_index,
             
             # Factor 2 features
             'factor2_dec': str(p2),
-            'factor2_bits': prime_features['bits'][j].tolist(),
+            'factor2_bits': p2_bit_array,
             'factor2_is_prime': True,
             'factor2_is_odd': bool(p2 % 2),
-            'factor2_popcount': int(prime_features['popcount'][j]),
-            'factor2_msb_index': int(prime_features['msb_index'][j]),
+            'factor2_popcount': p2_popcount,
+            'factor2_msb_index': p2_msb_index,
             
             # Product features
             'product_dec': str(product),
@@ -364,7 +426,7 @@ def generate_dataset_fast(max_bits: int, output_dir: str = "data",
                          repo_name: str = None, num_workers: int = None,
                          compression_level: int = 22, no_upload: bool = False, 
                          is_public: bool = False, max_memory_gb: float = None,
-                         force_chunk_size: int = None):
+                         force_chunk_size: int = None, lazy_features: bool = False):
     """FAST dataset generation - no multiprocessing bottlenecks."""
     
     print(f"🚀 FAST Synthetic Math Dataset Generator")
@@ -396,20 +458,24 @@ def generate_dataset_fast(max_bits: int, output_dir: str = "data",
     total_pairs = num_primes * (num_primes + 1) // 2
     print(f"Total pairs to generate: {total_pairs:,}")
     
-    # Compute prime features once
-    print("Computing prime features...")
-    n_primes = len(primes)
-    bits_array = np.zeros((n_primes, max_bits), dtype=np.uint8)
-    popcount_array = np.zeros(n_primes, dtype=np.uint8)
-    msb_index_array = np.zeros(n_primes, dtype=np.uint8)
+    # Compute prime features (or prepare for lazy computation)
+    if lazy_features:
+        print("Using lazy prime features computation (saves memory)")
+        prime_features = None  # Will be computed on-demand in workers
+    else:
+        print("Computing prime features...")
+        n_primes = len(primes)
+        bits_array = np.zeros((n_primes, max_bits), dtype=np.uint8)
+        popcount_array = np.zeros(n_primes, dtype=np.uint8)
+        msb_index_array = np.zeros(n_primes, dtype=np.uint8)
 
-    compute_features_fast(primes, max_bits, bits_array, popcount_array, msb_index_array)
+        compute_features_fast(primes, max_bits, bits_array, popcount_array, msb_index_array)
 
-    prime_features = {
-        'bits': bits_array,
-        'popcount': popcount_array,
-        'msb_index': msb_index_array
-    }
+        prime_features = {
+            'bits': bits_array,
+            'popcount': popcount_array,
+            'msb_index': msb_index_array
+        }
     print(f"Memory usage: {get_memory_usage()}")
     
     # Create output directory
@@ -457,27 +523,21 @@ def generate_dataset_fast(max_bits: int, output_dir: str = "data",
     
     print(f"Creating work chunks ({pairs_per_chunk:,} pairs per chunk)...")
     
+    # Memory-efficient chunking: pass only index ranges to workers
     worker_args = []
     chunk_id = 0
-    pair_idx = 0
     
-    # Generate all (i,j) pairs and split into chunks  
-    for i in range(num_primes):
-        chunk_pairs = []
-        for j in range(i, num_primes):
-            chunk_pairs.append((i, j))
-            pair_idx += 1
-            
-            # Create chunk when full
-            if len(chunk_pairs) >= pairs_per_chunk:
-                worker_args.append((chunk_pairs, primes, prime_features, max_bits, chunk_id, temp_dir))
-                chunk_pairs = []
-                chunk_id += 1
+    # Create chunks based on index ranges (no materialization of pairs)
+    for start_idx in range(0, total_pairs, pairs_per_chunk):
+        end_idx = min(start_idx + pairs_per_chunk, total_pairs)
         
-        # Add remaining pairs in chunk
-        if chunk_pairs:
-            worker_args.append((chunk_pairs, primes, prime_features, max_bits, chunk_id, temp_dir))
-            chunk_id += 1
+        worker_args.append((
+            start_idx, end_idx,           # Index range instead of materialized pairs  
+            primes, prime_features,       # Shared data (None if lazy)
+            max_bits, chunk_id, temp_dir, # Worker parameters
+            num_primes, lazy_features     # Needed for pair reconstruction and lazy mode
+        ))
+        chunk_id += 1
     
     print(f"Created {len(worker_args)} chunks")
     
@@ -535,6 +595,8 @@ def main():
                        help="Maximum memory to use in GB (default: auto-detect based on workers)")
     parser.add_argument("--chunk-size", type=int, default=None,
                        help="Force specific chunk size (pairs per chunk). Overrides memory calculations.")
+    parser.add_argument("--lazy-features", action="store_true",
+                       help="Compute prime features on-demand instead of pre-computing (saves memory)")
 
     args = parser.parse_args()
 
@@ -587,7 +649,8 @@ def main():
             no_upload=args.no_upload,
             is_public=args.public,
             max_memory_gb=args.max_memory,
-            force_chunk_size=args.chunk_size
+            force_chunk_size=args.chunk_size,
+            lazy_features=args.lazy_features
         )
     except KeyboardInterrupt:
         print("\n❌ Interrupted by user")
