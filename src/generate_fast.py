@@ -73,30 +73,37 @@ def pair_index_to_ij(pair_idx: int, num_primes: int) -> tuple:
     """
     Convert a linear pair index to (i,j) coordinates efficiently.
     
-    For pairs where i <= j, we can calculate this mathematically:
-    - Row i has (num_primes - i) pairs
-    - We find which row the index falls into, then the column
+    For pairs where i <= j:
+    - Row 0: (0,0), (0,1), ..., (0,num_primes-1) = num_primes pairs
+    - Row 1: (1,1), (1,2), ..., (1,num_primes-1) = num_primes-1 pairs  
+    - Row i: (i,i), (i,i+1), ..., (i,num_primes-1) = num_primes-i pairs
     """
     if pair_idx < 0:
         raise ValueError(f"Invalid pair index: {pair_idx}")
     
-    # Find row i using quadratic formula
-    # pair_idx = i * num_primes - i * (i + 1) / 2
-    # Solving for i: i = num_primes - 0.5 - sqrt((num_primes - 0.5)^2 - 2*pair_idx)
-    discriminant = (num_primes - 0.5) ** 2 - 2 * pair_idx
-    if discriminant < 0:
-        raise ValueError(f"Pair index {pair_idx} out of range")
+    total_pairs = num_primes * (num_primes + 1) // 2
+    if pair_idx >= total_pairs:
+        raise ValueError(f"Pair index {pair_idx} out of range (max: {total_pairs-1})")
     
-    i = int(num_primes - 0.5 - discriminant ** 0.5)
+    # Find which row i this pair_idx falls into
+    cumulative_pairs = 0
+    for i in range(num_primes):
+        pairs_in_row_i = num_primes - i
+        
+        if pair_idx < cumulative_pairs + pairs_in_row_i:
+            # Found the row! Calculate column j
+            offset_in_row = pair_idx - cumulative_pairs
+            j = i + offset_in_row
+            
+            if j >= num_primes:
+                raise ValueError(f"Calculated j={j} >= num_primes={num_primes}, i={i}, offset={offset_in_row}")
+            
+            return i, j
+        
+        cumulative_pairs += pairs_in_row_i
     
-    # Calculate j from the remaining offset in row i
-    pairs_before_row_i = i * num_primes - i * (i + 1) // 2
-    j = i + (pair_idx - pairs_before_row_i)
-    
-    if j >= num_primes:
-        raise ValueError(f"Calculated j={j} >= num_primes={num_primes}")
-    
-    return i, j
+    # Should never reach here due to the early bounds check
+    raise ValueError(f"Logic error: pair_idx {pair_idx} not found")
 
 def generate_pairs_for_range(start_idx: int, end_idx: int, num_primes: int):
     """Generate (i,j) pairs for a range of indices without materializing all pairs."""
