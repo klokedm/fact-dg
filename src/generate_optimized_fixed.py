@@ -29,7 +29,7 @@ try:
     CUPY_AVAILABLE = cp.cuda.is_available()
     if CUPY_AVAILABLE:
         device = cp.cuda.Device()
-        print(f"✓ CUDA available: {device.name}")
+        print(f"[OK] CUDA available: {device.name}")
 except ImportError:
     CUPY_AVAILABLE = False
 except Exception:
@@ -67,8 +67,8 @@ if NUMBA_AVAILABLE:
         """Ultra-fast JIT-compiled prime sieve."""
         if limit < 2:
             return np.array([], dtype=np.int32)
-        
-        prime = np.ones(limit + 1, dtype=bool)
+
+        prime = np.ones(limit + 1, dtype=np.bool_)
         prime[0] = prime[1] = False
         
         sqrt_limit = int(np.sqrt(limit)) + 1
@@ -305,14 +305,14 @@ def generate_dataset_optimized_fixed(max_bits: int, output_dir: str = "data",
                                    repo_name: str = None, num_workers: int = None,
                                    compression_level: int = 22):
     """Fixed optimized dataset generation with proper parallelization."""
-    print(f"🚀 Generating OPTIMIZED dataset for {max_bits}-bit prime pairs...")
+    print(f"Generating OPTIMIZED dataset for {max_bits}-bit prime pairs...")
     print(f"Target repository: {repo_name}")
     print(f"Maximum compression level: {compression_level}")
     
     # Show optimization status
-    print(f"Numba JIT: {'✓' if NUMBA_AVAILABLE else '❌'}")
-    print(f"Multiprocessing: ✓")
-    print(f"Memory monitoring: {'✓' if PSUTIL_AVAILABLE else '❌'}")
+    print(f"Numba JIT: {'[OK]' if NUMBA_AVAILABLE else '[NO]'}")
+    print(f"Multiprocessing: [OK]")
+    print(f"Memory monitoring: {'[OK]' if PSUTIL_AVAILABLE else '[NO]'}")
     
     # Set up workers
     if num_workers is None:
@@ -376,10 +376,10 @@ def generate_dataset_optimized_fixed(max_bits: int, output_dir: str = "data",
         print(f"Saving to {output_path} with compression level {compression_level}...")
         dataset.to_parquet(output_path, compression="zstd", compression_level=compression_level)
     except OSError as e:
-        print(f"❌ Error creating output directory or file: {e}")
+        print(f"ERROR: Creating output directory or file: {e}")
         raise
     except Exception as e:
-        print(f"❌ Error saving dataset: {e}")
+        print(f"ERROR: Saving dataset: {e}")
         raise
     
     # Show results
