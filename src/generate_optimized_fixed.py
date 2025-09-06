@@ -317,7 +317,9 @@ def generate_dataset_optimized_fixed(max_bits: int, output_dir: str = "data",
     # Set up workers
     if num_workers is None:
         num_workers = max(1, mp.cpu_count() - 1)
-    print(f"Using {num_workers} worker processes")
+        print(f"Using {num_workers} worker processes (auto-detected)")
+    else:
+        print(f"Using {num_workers} worker processes (user-specified)")
     
     # Generate primes with optimized sieve
     max_factor = 2**max_bits - 1
@@ -443,11 +445,29 @@ def main():
     parser.add_argument("max_bits", type=int, help="Maximum number of bits")
     parser.add_argument("--output-dir", type=str, default="data", help="Output directory")
     parser.add_argument("--repo-name", type=str, required=True, help="Name of the repository where dataset should be pushed")
-    parser.add_argument("--workers", type=int, default=None, help="Number of worker processes")
+    parser.add_argument("--workers", type=int, default=None, help="Number of worker processes (deprecated, use --cores)")
+    parser.add_argument("--cores", type=int, default=None, help="Number of CPU cores to use (default: auto-detect)")
     parser.add_argument("--compression-level", type=int, default=22,
                        help="Zstd compression level (1-22, default: 22 for maximum compression)")
     
     args = parser.parse_args()
+
+    # Handle cores/workers argument (prefer --cores, fallback to --workers for compatibility)
+    if args.cores is not None:
+        num_cores = args.cores
+    elif args.workers is not None:
+        num_cores = args.workers
+    else:
+        num_cores = None
+
+    # Validate cores argument
+    if num_cores is not None and num_cores < 1:
+        print("Error: Number of cores must be at least 1")
+        sys.exit(1)
+
+    if num_cores is not None and num_cores > mp.cpu_count():
+        print(f"Warning: Requested {num_cores} cores but only {mp.cpu_count()} available")
+        num_cores = mp.cpu_count()
 
     # Validate output directory
     if not os.path.exists(args.output_dir):
@@ -484,7 +504,7 @@ def main():
             max_bits=args.max_bits,
             output_dir=args.output_dir,
             repo_name=args.repo_name,
-            num_workers=args.workers,
+            num_workers=num_cores,
             compression_level=args.compression_level
         )
     except KeyboardInterrupt:
