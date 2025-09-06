@@ -28,8 +28,12 @@ try:
     import cupy as cp
     CUPY_AVAILABLE = cp.cuda.is_available()
     if CUPY_AVAILABLE:
-        print(f"✓ CUDA available: {cp.cuda.get_device_name()}")
+        device = cp.cuda.Device()
+        print(f"✓ CUDA available: {device.name}")
 except ImportError:
+    CUPY_AVAILABLE = False
+except Exception:
+    # Handle any CUDA-related errors gracefully
     CUPY_AVAILABLE = False
 
 try:
@@ -44,10 +48,13 @@ def get_memory_usage() -> str:
     if not PSUTIL_AVAILABLE:
         return "Memory monitoring unavailable (install psutil)"
 
-    process = psutil.Process()
-    memory_info = process.memory_info()
-    memory_mb = memory_info.rss / (1024**2)
-    return ".1f"
+    try:
+        process = psutil.Process()
+        memory_info = process.memory_info()
+        memory_mb = memory_info.rss / (1024**2)
+        return f"{memory_mb:.1f} MB"
+    except Exception as e:
+        return f"Memory monitoring error: {e}"
 
 
 # ============================================================================
