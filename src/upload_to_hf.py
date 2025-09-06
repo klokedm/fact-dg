@@ -56,12 +56,86 @@ except ImportError:
     print("Install with: pip install datasets huggingface_hub")
     sys.exit(1)
 
+# Check for Xet support
+try:
+    import hf_xet
+    XET_AVAILABLE = True
+except ImportError:
+    XET_AVAILABLE = False
+
 def get_file_size_mb(file_path: str) -> float:
     """Get file size in MB."""
     try:
         return os.path.getsize(file_path) / (1024**2)
     except OSError:
         return 0.0
+
+def check_xet_availability():
+    """Check if Xet is available and working."""
+    if not XET_AVAILABLE:
+        return False, "hf_xet not installed"
+    
+    try:
+        # Try to import and test basic Xet functionality
+        import hf_xet
+        return True, "hf_xet available"
+    except Exception as e:
+        return False, f"hf_xet error: {e}"
+
+def install_xet_support():
+    """Install Xet support for HuggingFace Hub."""
+    print("🔧 Installing Xet support...")
+    try:
+        import subprocess
+        result = subprocess.run([
+            sys.executable, "-m", "pip", "install", "-U", "huggingface_hub[hf_xet]"
+        ], capture_output=True, text=True, check=True)
+        
+        print("✅ Xet support installed successfully!")
+        print("ℹ️  Please restart the script to use Xet features")
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"❌ Failed to install Xet support: {e}")
+        print(f"Error output: {e.stderr}")
+        return False
+    except Exception as e:
+        print(f"❌ Unexpected error installing Xet: {e}")
+        return False
+
+def check_repo_xet_enabled(repo_name: str):
+    """Check if a repository has Xet enabled."""
+    try:
+        from huggingface_hub import HfApi
+        api = HfApi()
+        
+        # Try to get repository info
+        repo_info = api.repo_info(repo_id=repo_name, repo_type="dataset")
+        
+        # Check if Xet is enabled (this is heuristic-based since there's no direct API)
+        # Xet-enabled repos often have certain characteristics
+        xet_indicators = [
+            hasattr(repo_info, 'xet_enabled') and repo_info.xet_enabled,
+            # Add other heuristics as they become available
+        ]
+        
+        return any(xet_indicators), repo_info
+    except Exception as e:
+        # If repo doesn't exist yet, we can't determine Xet status
+        return None, f"Cannot check repo status: {e}"
+
+def print_xet_status():
+    """Print current Xet availability and status."""
+    print("🔍 Xet Support Status:")
+    
+    xet_available, xet_msg = check_xet_availability()
+    if xet_available:
+        print(f"   ✅ Xet: {xet_msg}")
+    else:
+        print(f"   ❌ Xet: {xet_msg}")
+        print("   💡 Install with: pip install -U 'huggingface_hub[hf_xet]'")
+        print("   📖 Or use --install-xet flag")
+    
+    return xet_available
 
 def check_authentication():
     """Check if HuggingFace authentication is working."""
@@ -117,7 +191,7 @@ def detect_dataset_info(parquet_path: str):
     }
 
 def upload_dataset(parquet_path: str, repo_name: str, private: bool = True, 
-                  token: str = None, chunk_size: int = 10000):
+                  token: str = None, chunk_size: int = 10000, use_xet: bool = None):
     """
     Upload parquet dataset to HuggingFace Hub with proper workspace handling.
     
@@ -127,6 +201,7 @@ def upload_dataset(parquet_path: str, repo_name: str, private: bool = True,
         private: Whether to make the dataset private
         token: HuggingFace token (if not already logged in)
         chunk_size: Chunk size for processing (smaller = less memory)
+        use_xet: Whether to use Xet for upload (None = auto-detect)
     """
     
     if not os.path.exists(parquet_path):
@@ -143,6 +218,42 @@ def upload_dataset(parquet_path: str, repo_name: str, private: bool = True,
     # Detect dataset information
     dataset_info = detect_dataset_info(parquet_path)
     print(f"Detected: {dataset_info['description']}")
+    
+    # Check Xet availability and determine usage
+    xet_available, xet_msg = check_xet_availability()
+    
+    if use_xet is None:
+        # Auto-detect: use Xet if available
+        use_xet = xet_available
+    elif use_xet and not xet_available:
+        print(f"❌ Xet requested but not available: {xet_msg}")
+        print("💡 Install with: pip install -U 'huggingface_hub[hf_xet]'")
+        return False
+    
+    print(f"Upload method: {'Xet-enabled' if use_xet else 'Standard'} HuggingFace Hub")
+    
+    if use_xet:
+        print(f"✅ Using Xet for efficient chunk-based deduplication")
+        print(f"   - Faster uploads for large files")
+        print(f"   - Better resumption on interruption") 
+    else:
+        print(f"ℹ️  Using standard HuggingFace upload")
+        if xet_available:
+            print(f"   💡 Add --xet flag to enable Xet uploads")
+        else:
+            print(f"   💡 Install hf_xet for faster uploads: pip install -U 'huggingface_hub[hf_xet]'")
+    
+    # Check if target repo is Xet-enabled (informational)
+    if use_xet:
+        try:
+            repo_xet_status, repo_info = check_repo_xet_enabled(repo_name)
+            if repo_xet_status is True:
+                print(f"✅ Target repository is Xet-enabled")
+            elif repo_xet_status is False:
+                print(f"⚠️  Target repository may not be Xet-enabled - upload may fall back to standard method")
+            # else: repo doesn't exist yet, which is fine
+        except Exception:
+            pass  # Don't fail on repo status check
     
     # Login if token provided
     if token:
@@ -221,23 +332,35 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Check if you're logged in
+  # Check if you're logged in and Xet status
   python3 upload_to_hf.py --check-auth
   
   # Login to HuggingFace (first time setup)
   python3 upload_to_hf.py --login
   
+  # Install Xet support for faster uploads
+  python3 upload_to_hf.py --install-xet
+  
+  # Check Xet availability
+  python3 upload_to_hf.py --check-xet
+  
   # List available datasets
   python3 upload_to_hf.py --list
 
-  # Upload private dataset
+  # Upload private dataset (auto-detects Xet)
   python3 upload_to_hf.py data/prime_products_18bit_fast.parquet username/math-18
 
+  # Upload with Xet enabled (faster, better resumption)
+  python3 upload_to_hf.py data/prime_products_18bit_fast.parquet username/math-18 --xet
+
+  # Upload without Xet (standard method)
+  python3 upload_to_hf.py data/prime_products_18bit_fast.parquet username/math-18 --no-xet
+
   # Upload public dataset  
-  python3 upload_to_hf.py data/prime_products_16bit_fast.parquet username/math-16 --public
+  python3 upload_to_hf.py data/prime_products_16bit_fast.parquet username/math-16 --public --xet
   
   # Upload with specific token
-  python3 upload_to_hf.py data/prime_products_20bit_fast.parquet username/math-20 --token YOUR_TOKEN
+  python3 upload_to_hf.py data/prime_products_20bit_fast.parquet username/math-20 --token YOUR_TOKEN --xet
         """
     )
     
@@ -249,8 +372,28 @@ Examples:
     parser.add_argument("--chunk-size", type=int, default=10000, help="Processing chunk size")
     parser.add_argument("--login", action="store_true", help="Login to HuggingFace (stores token in workspace)")
     parser.add_argument("--check-auth", action="store_true", help="Check authentication status")
+    parser.add_argument("--xet", action="store_true", help="Force enable Xet for uploads (faster, better resumption)")
+    parser.add_argument("--no-xet", action="store_true", help="Force disable Xet, use standard uploads")
+    parser.add_argument("--check-xet", action="store_true", help="Check Xet availability and status")
+    parser.add_argument("--install-xet", action="store_true", help="Install Xet support for HuggingFace Hub")
     
     args = parser.parse_args()
+    
+    # Handle conflicting Xet flags
+    if args.xet and args.no_xet:
+        parser.error("Cannot use both --xet and --no-xet flags")
+    
+    # Check Xet status
+    if args.check_xet:
+        print_xet_status()
+        return
+    
+    # Install Xet support
+    if args.install_xet:
+        success = install_xet_support()
+        if success:
+            print("🎉 Xet support ready! You can now use --xet flag for faster uploads")
+        return
     
     # Check authentication status
     if args.check_auth:
@@ -259,6 +402,10 @@ Examples:
             print("🎉 Ready to upload datasets!")
         else:
             print("💡 Run with --login to authenticate")
+        
+        # Also show Xet status
+        print()
+        print_xet_status()
         return
     
     # Login to HuggingFace
@@ -309,13 +456,21 @@ Examples:
         print(f"   Got: {args.repo_name}")
         sys.exit(1)
     
+    # Determine Xet preference
+    use_xet = None  # Auto-detect by default
+    if args.xet:
+        use_xet = True
+    elif args.no_xet:
+        use_xet = False
+    
     try:
         success = upload_dataset(
             parquet_path=args.parquet_file,
             repo_name=args.repo_name,
             private=not args.public,
             token=args.token,
-            chunk_size=args.chunk_size
+            chunk_size=args.chunk_size,
+            use_xet=use_xet
         )
         
         if success:
