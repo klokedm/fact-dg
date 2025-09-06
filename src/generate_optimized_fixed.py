@@ -176,6 +176,72 @@ else:
 
 
 # ============================================================================
+# CUDA-ACCELERATED FUNCTIONS (OPTIONAL)
+# ============================================================================
+
+if CUPY_AVAILABLE:
+    def cuda_int_to_bits_batch(numbers: np.ndarray, bit_length: int) -> np.ndarray:
+        """CUDA-accelerated batch conversion of integers to bit arrays."""
+        import cupy as cp
+        
+        # Transfer to GPU
+        gpu_numbers = cp.asarray(numbers)
+        n = len(gpu_numbers)
+        
+        # Create result array on GPU
+        gpu_result = cp.zeros((n, bit_length), dtype=cp.uint8)
+        
+        # CUDA kernel for bit extraction (vectorized)
+        for bit_pos in range(bit_length):
+            gpu_result[:, bit_length - 1 - bit_pos] = (gpu_numbers >> bit_pos) & 1
+        
+        # Transfer back to CPU
+        return cp.asnumpy(gpu_result)
+    
+    def cuda_popcount_batch(numbers: np.ndarray) -> np.ndarray:
+        """CUDA-accelerated batch popcount using GPU bit operations."""
+        import cupy as cp
+        
+        # Transfer to GPU
+        gpu_numbers = cp.asarray(numbers, dtype=cp.uint64)
+        
+        # Use CuPy's built-in popcount (much faster than manual counting)
+        gpu_result = cp.zeros(len(gpu_numbers), dtype=cp.uint8)
+        
+        # Manual popcount for each number (CuPy doesn't have built-in popcount)
+        for i in range(len(gpu_numbers)):
+            num = gpu_numbers[i]
+            count = 0
+            while num:
+                count += num & 1
+                num >>= 1
+            gpu_result[i] = count
+        
+        return cp.asnumpy(gpu_result)
+    
+    def cuda_mathematical_operations(products: np.ndarray) -> tuple:
+        """CUDA-accelerated mathematical operations for a and b values."""
+        import cupy as cp
+        
+        # Transfer to GPU
+        gpu_products = cp.asarray(products, dtype=cp.uint64)
+        
+        # Vectorized operations on GPU
+        gpu_products_squared = gpu_products * gpu_products
+        gpu_a_values = (gpu_products_squared - 1) // 2
+        gpu_b_values = (gpu_products_squared + 1) // 2
+        
+        # Transfer back to CPU
+        return (cp.asnumpy(gpu_a_values), cp.asnumpy(gpu_b_values))
+
+else:
+    # Fallback to CPU versions if CUDA not available
+    cuda_int_to_bits_batch = None
+    cuda_popcount_batch = None
+    cuda_mathematical_operations = None
+
+
+# ============================================================================
 # OPTIMIZED FEATURE COMPUTATION
 # ============================================================================
 
@@ -189,13 +255,24 @@ def compute_prime_features_vectorized(primes: np.ndarray, max_bits: int) -> Dict
     # Decimal representations (vectorized string formatting)
     decimals = np.array([f'{p:0{factor_dec_len}d}' for p in primes])
     
-    # Binary bit arrays (vectorized)
-    bits = fast_int_to_bits_batch(primes, max_bits)
+    # Binary bit arrays (vectorized with optional CUDA acceleration)
+    if CUPY_AVAILABLE and len(primes) > 1000:  # Use GPU for large arrays
+        bits = cuda_int_to_bits_batch(primes, max_bits)
+        print(f"  Using CUDA for bit conversion ({len(primes)} primes)")
+    else:
+        bits = fast_int_to_bits_batch(primes, max_bits)
     
     # Mathematical features (all vectorized)
     is_prime = np.ones(len(primes), dtype=bool)
     is_odd = (primes % 2 == 1).astype(bool)
-    popcount = fast_popcount_batch(primes)
+    
+    # Popcount with optional CUDA acceleration
+    if CUPY_AVAILABLE and len(primes) > 1000:
+        popcount = cuda_popcount_batch(primes)
+        print(f"  Using CUDA for popcount ({len(primes)} primes)")
+    else:
+        popcount = fast_popcount_batch(primes)
+    
     msb_index = fast_msb_index_batch(primes)
     
     return {
@@ -223,20 +300,52 @@ def compute_products_and_features(prime_pairs: List[Tuple[int, int]], primes: np
     # Decimal representations
     decimals = np.array([f'{p:0{product_dec_len}d}' for p in products])
     
-    # Binary bit arrays
-    bits = fast_int_to_bits_batch(products, product_bin_len)
+    # Binary bit arrays with optional CUDA acceleration
+    if CUPY_AVAILABLE and len(products) > 500:  # Use GPU for medium+ arrays
+        bits = cuda_int_to_bits_batch(products, product_bin_len)
+    else:
+        bits = fast_int_to_bits_batch(products, product_bin_len)
     
-    # Mathematical features
-    popcount = fast_popcount_batch(products)
+    # Mathematical features with optional CUDA acceleration
+    if CUPY_AVAILABLE and len(products) > 500:
+        popcount = cuda_popcount_batch(products)
+    else:
+        popcount = fast_popcount_batch(products)
+    
     bit_length = np.array([int(p).bit_length() for p in products], dtype=np.uint8)
     trailing_zeros = fast_trailing_zeros_batch(products)
+    
+    # Compute a and b values for p² = b² - a² formula with optional CUDA acceleration
+    if CUPY_AVAILABLE and len(products) > 500:
+        a_values, b_values = cuda_mathematical_operations(products)
+    else:
+        # CPU version
+        products_squared = products * products
+        a_values = (products_squared - 1) // 2
+        b_values = (products_squared + 1) // 2
+    
+    # Decimal representations for a and b (same padding as product)
+    a_decimals = np.array([f'{a:0{product_dec_len}d}' for a in a_values])
+    b_decimals = np.array([f'{b:0{product_dec_len}d}' for b in b_values])
+    
+    # Binary representations for a and b with optional CUDA acceleration
+    if CUPY_AVAILABLE and len(a_values) > 500:
+        a_bits = cuda_int_to_bits_batch(a_values, product_bin_len)
+        b_bits = cuda_int_to_bits_batch(b_values, product_bin_len)
+    else:
+        a_bits = fast_int_to_bits_batch(a_values, product_bin_len)
+        b_bits = fast_int_to_bits_batch(b_values, product_bin_len)
     
     return {
         'decimals': decimals,
         'bits': bits,
         'popcount': popcount,
         'bit_length': bit_length,
-        'trailing_zeros': trailing_zeros
+        'trailing_zeros': trailing_zeros,
+        'a_dec': a_decimals,
+        'a_bits': a_bits,
+        'b_dec': b_decimals,
+        'b_bits': b_bits
     }
 
 
@@ -284,6 +393,12 @@ def generate_chunk_pairs(args):
             'product_bit_length': product_features['bit_length'][idx],
             'product_trailing_zeros': product_features['trailing_zeros'][idx],
             
+            # a and b values for p² = b² - a² formula
+            'a_dec': product_features['a_dec'][idx],
+            'a_bits': product_features['a_bits'][idx].tolist(),
+            'b_dec': product_features['b_dec'][idx],
+            'b_bits': product_features['b_bits'][idx].tolist(),
+            
             # Pair-level features
             'pair_is_same': i == j,
             'pair_coprime': i != j,
@@ -308,6 +423,7 @@ def generate_dataset_optimized_fixed(max_bits: int, output_dir: str = "data",
     
     # Show optimization status
     print(f"Numba JIT: {'[OK]' if NUMBA_AVAILABLE else '[NO]'}")
+    print(f"CUDA GPU: {'[OK]' if CUPY_AVAILABLE else '[NO]'}")
     print(f"Multiprocessing: [OK]")
     print(f"Memory monitoring: {'[OK]' if PSUTIL_AVAILABLE else '[NO]'}")
     
@@ -467,6 +583,12 @@ def create_dataset_features_optimized_fixed(max_bits: int) -> Features:
         'product_popcount': Value('uint8'),
         'product_bit_length': Value('uint8'),
         'product_trailing_zeros': Value('uint8'),
+        
+        # a and b values for p² = b² - a² formula
+        'a_dec': Value('string'),
+        'a_bits': Sequence(Value('uint8'), length=product_bin_len),
+        'b_dec': Value('string'),
+        'b_bits': Sequence(Value('uint8'), length=product_bin_len),
         
         # Pair-level
         'pair_is_same': Value('bool'),
