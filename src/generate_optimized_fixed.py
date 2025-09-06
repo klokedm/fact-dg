@@ -66,7 +66,7 @@ if NUMBA_AVAILABLE:
     def fast_sieve_of_eratosthenes(limit: int) -> np.ndarray:
         """Ultra-fast JIT-compiled prime sieve."""
         if limit < 2:
-            return np.array([], dtype=np.int32)
+            return np.empty(0, dtype=np.int32)
 
         prime = np.ones(limit + 1, dtype=np.bool_)
         prime[0] = prime[1] = False
@@ -138,7 +138,7 @@ else:
     # Fallback implementations without Numba
     def fast_sieve_of_eratosthenes(limit: int) -> np.ndarray:
         if limit < 2:
-            return np.array([], dtype=np.int32)
+            return np.empty(0, dtype=np.int32)
         
         prime = np.ones(limit + 1, dtype=bool)
         prime[0] = prime[1] = False
