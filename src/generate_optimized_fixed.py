@@ -156,7 +156,7 @@ else:
         return np.array([bin(x).count('1') for x in numbers], dtype=np.uint8)
     
     def fast_msb_index_batch(numbers: np.ndarray) -> np.ndarray:
-        return np.array([x.bit_length() - 1 if x > 0 else 0 for x in numbers], dtype=np.uint8)
+        return np.array([int(x).bit_length() - 1 if x > 0 else 0 for x in numbers], dtype=np.uint8)
     
     def fast_trailing_zeros_batch(numbers: np.ndarray) -> np.ndarray:
         result = np.zeros(len(numbers), dtype=np.uint8)
@@ -164,7 +164,7 @@ else:
             if num == 0:
                 result[i] = 0
             else:
-                result[i] = (num & -num).bit_length() - 1
+                result[i] = int(num & -num).bit_length() - 1
         return result
 
 
@@ -221,7 +221,7 @@ def compute_products_and_features(prime_pairs: List[Tuple[int, int]], primes: np
     
     # Mathematical features
     popcount = fast_popcount_batch(products)
-    bit_length = np.array([p.bit_length() for p in products], dtype=np.uint8)
+    bit_length = np.array([int(p).bit_length() for p in products], dtype=np.uint8)
     trailing_zeros = fast_trailing_zeros_batch(products)
     
     return {
