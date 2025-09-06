@@ -341,7 +341,7 @@ def upload_to_huggingface(output_path: str, repo_name: str, max_bits: int, is_pr
 def generate_dataset_fast(max_bits: int, output_dir: str = "data",
                          repo_name: str = None, num_workers: int = None,
                          compression_level: int = 22, no_upload: bool = False, 
-                         is_public: bool = False):
+                         is_public: bool = False, max_memory_gb: float = None):
     """FAST dataset generation - no multiprocessing bottlenecks."""
     
     print(f"🚀 FAST Synthetic Math Dataset Generator")
@@ -395,10 +395,20 @@ def generate_dataset_fast(max_bits: int, output_dir: str = "data",
     os.makedirs(temp_dir, exist_ok=True)
     
     # Split work into chunks - optimize for memory usage
-    # Target ~1-2GB per chunk to avoid OOM on large datasets
-    target_memory_per_chunk_gb = 2
+    if max_memory_gb is not None:
+        # User-specified memory limit
+        available_memory_gb = max_memory_gb
+        worker_memory_gb = available_memory_gb / num_workers
+        print(f"Memory limit: {available_memory_gb:.1f}GB total, {worker_memory_gb:.2f}GB per worker")
+    else:
+        # Auto-detect: conservative estimate based on workers
+        worker_memory_gb = 2.0  # Default 2GB per worker
+        available_memory_gb = worker_memory_gb * num_workers
+        print(f"Auto-detected memory: {available_memory_gb:.1f}GB total, {worker_memory_gb:.2f}GB per worker")
+    
+    # Calculate optimal chunk size based on memory
     bytes_per_record = 400  # Rough estimate including all fields
-    target_records_per_chunk = int(target_memory_per_chunk_gb * 1024**3 / bytes_per_record)
+    target_records_per_chunk = int(worker_memory_gb * 1024**3 / bytes_per_record)
     
     pairs_per_chunk = min(
         max(10000, total_pairs // (num_workers * 4)),  # Original logic
@@ -481,6 +491,8 @@ def main():
     parser.add_argument("--public", action="store_true", help="Make dataset public (default: private)")
     parser.add_argument("--no-numba", action="store_true", help="Disable Numba JIT compilation (use fallback)")
     parser.add_argument("--test", action="store_true", help="Run a quick test with small dataset (8-bit)")
+    parser.add_argument("--max-memory", type=float, default=None, 
+                       help="Maximum memory to use in GB (default: auto-detect based on workers)")
 
     args = parser.parse_args()
 
@@ -494,6 +506,22 @@ def main():
     if args.max_bits < 1 or args.max_bits > 32:
         print("Error: max_bits must be between 1 and 32")
         sys.exit(1)
+        
+    # Validate memory limit
+    if args.max_memory is not None:
+        if args.max_memory < 0.5:
+            print("Error: --max-memory must be at least 0.5 GB")
+            sys.exit(1)
+        elif args.max_memory > 1024:
+            print("Warning: --max-memory is very large (>1TB). Are you sure?")
+        
+        # Ensure workers can get reasonable memory
+        if args.workers is not None:
+            memory_per_worker = args.max_memory / args.workers
+            if memory_per_worker < 0.1:
+                print(f"Error: Too many workers for memory limit. "
+                      f"{args.workers} workers would get only {memory_per_worker:.2f}GB each")
+                sys.exit(1)
         
     # Show dataset size warning
     if args.max_bits >= 16:
@@ -515,7 +543,8 @@ def main():
             num_workers=args.workers,
             compression_level=args.compression_level,
             no_upload=args.no_upload,
-            is_public=args.public
+            is_public=args.public,
+            max_memory_gb=args.max_memory
         )
     except KeyboardInterrupt:
         print("\n❌ Interrupted by user")
