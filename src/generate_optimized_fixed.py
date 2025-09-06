@@ -1,0 +1,447 @@
+#!/usr/bin/env python3
+"""
+Fixed Optimized Synthetic Math Dataset Generator
+
+Corrected high-performance version with proper parallelization,
+vectorization, and maximum compression.
+"""
+
+import argparse
+import os
+import sys
+import math
+import multiprocessing as mp
+from typing import List, Dict, Any, Tuple, Optional
+import numpy as np
+from datasets import Dataset, Features, Value, Sequence
+from tqdm import tqdm
+
+# Performance optimizations
+try:
+    from numba import jit, prange
+    NUMBA_AVAILABLE = True
+except ImportError:
+    print("WARNING: Numba not available. Install with: pip install numba")
+    NUMBA_AVAILABLE = False
+
+try:
+    import cupy as cp
+    CUPY_AVAILABLE = cp.cuda.is_available()
+    if CUPY_AVAILABLE:
+        print(f"✓ CUDA available: {cp.cuda.get_device_name()}")
+except ImportError:
+    CUPY_AVAILABLE = False
+
+
+# ============================================================================
+# OPTIMIZED PRIME GENERATION (SAME AS BEFORE)
+# ============================================================================
+
+if NUMBA_AVAILABLE:
+    @jit(nopython=True, cache=True)
+    def fast_sieve_of_eratosthenes(limit: int) -> np.ndarray:
+        """Ultra-fast JIT-compiled prime sieve."""
+        if limit < 2:
+            return np.array([], dtype=np.int32)
+        
+        prime = np.ones(limit + 1, dtype=np.bool_)
+        prime[0] = prime[1] = False
+        
+        sqrt_limit = int(np.sqrt(limit)) + 1
+        for p in range(2, sqrt_limit):
+            if prime[p]:
+                prime[p*p::p] = False
+        
+        return np.where(prime)[0].astype(np.int32)
+
+    @jit(nopython=True, cache=True)  
+    def fast_int_to_bits_batch(numbers: np.ndarray, bit_length: int) -> np.ndarray:
+        """Fast batch conversion of integers to bit arrays."""
+        n = len(numbers)
+        result = np.zeros((n, bit_length), dtype=np.uint8)
+        
+        for idx in prange(n):
+            num = numbers[idx]
+            for bit_pos in range(bit_length):
+                result[idx, bit_length - 1 - bit_pos] = (num >> bit_pos) & 1
+        
+        return result
+    
+    @jit(nopython=True, cache=True)
+    def fast_popcount_batch(numbers: np.ndarray) -> np.ndarray:
+        """Fast batch popcount."""
+        result = np.zeros(len(numbers), dtype=np.uint8)
+        for i in prange(len(numbers)):
+            num = numbers[i]
+            count = 0
+            while num:
+                count += num & 1
+                num >>= 1
+            result[i] = count
+        return result
+    
+    @jit(nopython=True, cache=True)
+    def fast_msb_index_batch(numbers: np.ndarray) -> np.ndarray:
+        """Fast batch MSB index calculation."""
+        result = np.zeros(len(numbers), dtype=np.uint8)
+        for i in prange(len(numbers)):
+            num = numbers[i]
+            if num == 0:
+                result[i] = 0
+            else:
+                msb = 0
+                while (1 << (msb + 1)) <= num:
+                    msb += 1
+                result[i] = msb
+        return result
+    
+    @jit(nopython=True, cache=True)
+    def fast_trailing_zeros_batch(numbers: np.ndarray) -> np.ndarray:
+        """Fast batch trailing zeros calculation."""
+        result = np.zeros(len(numbers), dtype=np.uint8)
+        for i in prange(len(numbers)):
+            num = numbers[i]
+            if num == 0:
+                result[i] = 0
+            else:
+                count = 0
+                while (num & (1 << count)) == 0:
+                    count += 1
+                result[i] = count
+        return result
+
+else:
+    # Fallback implementations without Numba
+    def fast_sieve_of_eratosthenes(limit: int) -> np.ndarray:
+        if limit < 2:
+            return np.array([], dtype=np.int32)
+        
+        prime = np.ones(limit + 1, dtype=bool)
+        prime[0] = prime[1] = False
+        
+        for p in range(2, int(np.sqrt(limit)) + 1):
+            if prime[p]:
+                prime[p*p::p] = False
+        
+        return np.where(prime)[0].astype(np.int32)
+    
+    def fast_int_to_bits_batch(numbers: np.ndarray, bit_length: int) -> np.ndarray:
+        n = len(numbers)
+        result = np.zeros((n, bit_length), dtype=np.uint8)
+        
+        for i, num in enumerate(numbers):
+            bits = np.array([(num >> j) & 1 for j in range(bit_length)[::-1]], dtype=np.uint8)
+            result[i] = bits
+        
+        return result
+    
+    def fast_popcount_batch(numbers: np.ndarray) -> np.ndarray:
+        return np.array([bin(x).count('1') for x in numbers], dtype=np.uint8)
+    
+    def fast_msb_index_batch(numbers: np.ndarray) -> np.ndarray:
+        return np.array([x.bit_length() - 1 if x > 0 else 0 for x in numbers], dtype=np.uint8)
+    
+    def fast_trailing_zeros_batch(numbers: np.ndarray) -> np.ndarray:
+        result = np.zeros(len(numbers), dtype=np.uint8)
+        for i, num in enumerate(numbers):
+            if num == 0:
+                result[i] = 0
+            else:
+                result[i] = (num & -num).bit_length() - 1
+        return result
+
+
+# ============================================================================
+# OPTIMIZED FEATURE COMPUTATION
+# ============================================================================
+
+def compute_prime_features_vectorized(primes: np.ndarray, max_bits: int) -> Dict[str, np.ndarray]:
+    """Batch compute all prime features using vectorized operations."""
+    
+    # Pre-calculate padding
+    max_factor = 2**max_bits - 1
+    factor_dec_len = len(str(max_factor))
+    
+    # Decimal representations (vectorized string formatting)
+    decimals = np.array([f'{p:0{factor_dec_len}d}' for p in primes])
+    
+    # Binary bit arrays (vectorized)
+    bits = fast_int_to_bits_batch(primes, max_bits)
+    
+    # Mathematical features (all vectorized)
+    is_prime = np.ones(len(primes), dtype=bool)
+    is_odd = (primes % 2 == 1).astype(bool)
+    popcount = fast_popcount_batch(primes)
+    msb_index = fast_msb_index_batch(primes)
+    
+    return {
+        'decimals': decimals,
+        'bits': bits,
+        'is_prime': is_prime,
+        'is_odd': is_odd,
+        'popcount': popcount,
+        'msb_index': msb_index
+    }
+
+
+def compute_products_and_features(prime_pairs: List[Tuple[int, int]], primes: np.ndarray, 
+                                max_bits: int) -> Dict[str, np.ndarray]:
+    """Compute products and their features for a batch of prime pairs."""
+    
+    max_factor = 2**max_bits - 1
+    max_product = max_factor * max_factor
+    product_dec_len = len(str(max_product))
+    product_bin_len = max_bits * 2
+    
+    # Extract products
+    products = np.array([primes[i] * primes[j] for i, j in prime_pairs], dtype=np.uint64)
+    
+    # Decimal representations
+    decimals = np.array([f'{p:0{product_dec_len}d}' for p in products])
+    
+    # Binary bit arrays
+    bits = fast_int_to_bits_batch(products, product_bin_len)
+    
+    # Mathematical features
+    popcount = fast_popcount_batch(products)
+    bit_length = np.array([p.bit_length() for p in products], dtype=np.uint8)
+    trailing_zeros = fast_trailing_zeros_batch(products)
+    
+    return {
+        'decimals': decimals,
+        'bits': bits,
+        'popcount': popcount,
+        'bit_length': bit_length,
+        'trailing_zeros': trailing_zeros
+    }
+
+
+# ============================================================================
+# PARALLEL WORKER FUNCTIONS
+# ============================================================================
+
+def generate_chunk_pairs(args):
+    """Worker function to generate pairs for a chunk of the first factor."""
+    primes, prime_features, start_i, end_i, max_bits, chunk_id = args
+    
+    # Generate all pairs where first factor is in [start_i, end_i)
+    pairs = []
+    for i in range(start_i, min(end_i, len(primes))):
+        for j in range(i, len(primes)):  # j >= i for unique unordered pairs
+            pairs.append((i, j))
+    
+    if not pairs:
+        return []
+    
+    # Compute product features for this chunk
+    product_features = compute_products_and_features(pairs, primes, max_bits)
+    
+    # Build records
+    records = []
+    for idx, (i, j) in enumerate(pairs):
+        record = {
+            # Factor 1 features
+            'factor1_dec': prime_features['decimals'][i],
+            'factor1_bits': prime_features['bits'][i].tolist(),
+            'factor1_is_prime': prime_features['is_prime'][i],
+            'factor1_is_odd': prime_features['is_odd'][i],
+            'factor1_popcount': prime_features['popcount'][i],
+            'factor1_msb_index': prime_features['msb_index'][i],
+            
+            # Factor 2 features
+            'factor2_dec': prime_features['decimals'][j],
+            'factor2_bits': prime_features['bits'][j].tolist(),
+            'factor2_is_prime': prime_features['is_prime'][j],
+            'factor2_is_odd': prime_features['is_odd'][j],
+            'factor2_popcount': prime_features['popcount'][j],
+            'factor2_msb_index': prime_features['msb_index'][j],
+            
+            # Product features
+            'product_dec': product_features['decimals'][idx],
+            'product_bits': product_features['bits'][idx].tolist(),
+            'product_popcount': product_features['popcount'][idx],
+            'product_bit_length': product_features['bit_length'][idx],
+            'product_trailing_zeros': product_features['trailing_zeros'][idx],
+            
+            # Pair-level features
+            'pair_is_same': i == j,
+            'pair_coprime': i != j,
+            'product_is_square': i == j,
+        }
+        records.append(record)
+    
+    return records
+
+
+# ============================================================================
+# MAIN OPTIMIZED GENERATION FUNCTION
+# ============================================================================
+
+def generate_dataset_optimized_fixed(max_bits: int, output_dir: str = "data", 
+                                   num_workers: int = None, batch_size: int = 100000,
+                                   compression_level: int = 22):
+    """Fixed optimized dataset generation with proper parallelization."""
+    print(f"🚀 Generating OPTIMIZED dataset for {max_bits}-bit prime pairs...")
+    print(f"Maximum compression level: {compression_level}")
+    
+    # Show optimization status
+    print(f"Numba JIT: {'✓' if NUMBA_AVAILABLE else '❌'}")
+    print(f"Multiprocessing: ✓")
+    
+    # Set up workers
+    if num_workers is None:
+        num_workers = max(1, mp.cpu_count() - 1)
+    print(f"Using {num_workers} worker processes")
+    
+    # Generate primes with optimized sieve
+    max_factor = 2**max_bits - 1
+    print("Generating prime numbers...")
+    primes = fast_sieve_of_eratosthenes(max_factor)
+    num_primes = len(primes)
+    print(f"Found {num_primes} prime numbers up to {max_factor}")
+    
+    # Calculate total pairs
+    total_pairs = num_primes * (num_primes + 1) // 2
+    print(f"Total unique pairs to generate: {total_pairs:,}")
+    
+    # Pre-compute all prime features (vectorized)
+    print("Computing prime features...")
+    prime_features = compute_prime_features_vectorized(primes, max_bits)
+    
+    # Create dataset features schema
+    features = create_dataset_features_optimized_fixed(max_bits)
+    
+    # Generate data using parallel processing
+    def parallel_data_generator():
+        """Parallel generator with proper load balancing."""
+        
+        # Calculate chunk size for load balancing
+        chunk_size = max(1, num_primes // (num_workers * 4))  # Smaller chunks for better balance
+        
+        # Prepare worker arguments
+        worker_args = []
+        for start_i in range(0, num_primes, chunk_size):
+            end_i = min(start_i + chunk_size, num_primes)
+            chunk_id = len(worker_args)
+            worker_args.append((primes, prime_features, start_i, end_i, max_bits, chunk_id))
+        
+        print(f"Processing {len(worker_args)} chunks with {num_workers} workers...")
+        
+        # Process chunks in parallel
+        with mp.Pool(num_workers) as pool:
+            # Use imap for progress tracking
+            with tqdm(total=total_pairs, desc="Generating pairs", unit="pairs") as pbar:
+                for chunk_records in pool.imap(generate_chunk_pairs, worker_args):
+                    for record in chunk_records:
+                        yield record
+                        pbar.update(1)
+    
+    # Create dataset from generator
+    print("Creating optimized dataset...")
+    dataset = Dataset.from_generator(parallel_data_generator, features=features)
+    
+    # Save with maximum compression
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(output_dir, f"prime_products_{max_bits}bit_optimized_fixed.parquet")
+    
+    print(f"Saving to {output_path} with compression level {compression_level}...")
+    dataset.to_parquet(output_path, compression="zstd", compression_level=compression_level)
+    
+    # Show results
+    file_size_mb = os.path.getsize(output_path) / (1024**2)
+    estimated_uncompressed_mb = total_pairs * 150 / (1024**2)  # Rough estimate
+    compression_ratio = estimated_uncompressed_mb / file_size_mb if file_size_mb > 0 else 0
+    
+    print(f"✅ Dataset saved successfully!")
+    print(f"Rows: {len(dataset):,}")
+    print(f"File size: {file_size_mb:.2f} MB")
+    print(f"Compression ratio: {compression_ratio:.1f}:1")
+    print(f"Compression efficiency: {((1 - file_size_mb/estimated_uncompressed_mb) * 100):.1f}%")
+
+
+def create_dataset_features_optimized_fixed(max_bits: int) -> Features:
+    """Create optimized Arrow schema."""
+    factor_bin_len = max_bits
+    product_bin_len = max_bits * 2
+    
+    return Features({
+        # Factor 1
+        'factor1_dec': Value('string'),
+        'factor1_bits': Sequence(Value('uint8'), length=factor_bin_len),
+        'factor1_is_prime': Value('bool'),
+        'factor1_is_odd': Value('bool'),
+        'factor1_popcount': Value('uint8'),
+        'factor1_msb_index': Value('uint8'),
+        
+        # Factor 2
+        'factor2_dec': Value('string'),
+        'factor2_bits': Sequence(Value('uint8'), length=factor_bin_len),
+        'factor2_is_prime': Value('bool'),
+        'factor2_is_odd': Value('bool'),
+        'factor2_popcount': Value('uint8'),
+        'factor2_msb_index': Value('uint8'),
+        
+        # Product
+        'product_dec': Value('string'),
+        'product_bits': Sequence(Value('uint8'), length=product_bin_len),
+        'product_popcount': Value('uint8'),
+        'product_bit_length': Value('uint8'),
+        'product_trailing_zeros': Value('uint8'),
+        
+        # Pair-level
+        'pair_is_same': Value('bool'),
+        'pair_coprime': Value('bool'),
+        'product_is_square': Value('bool')
+    })
+
+
+def main():
+    """Main entry point for fixed optimized generator."""
+    parser = argparse.ArgumentParser(description="FIXED OPTIMIZED Synthetic Math Dataset Generator")
+    parser.add_argument("max_bits", type=int, help="Maximum number of bits")
+    parser.add_argument("--output-dir", type=str, default="data", help="Output directory")
+    parser.add_argument("--workers", type=int, default=None, help="Number of worker processes")
+    parser.add_argument("--batch-size", type=int, default=100000, help="Processing batch size")
+    parser.add_argument("--compression-level", type=int, default=22, 
+                       help="Zstd compression level (1-22, default: 22 for maximum compression)")
+    
+    args = parser.parse_args()
+    
+    if args.max_bits < 1 or args.max_bits > 32:
+        print("Error: max_bits must be between 1 and 32")
+        sys.exit(1)
+        
+    if args.compression_level < 1 or args.compression_level > 22:
+        print("Error: compression_level must be between 1 and 22")
+        sys.exit(1)
+    
+    # Show warning for large datasets
+    if args.max_bits >= 16:
+        max_factor = 2**args.max_bits - 1
+        primes_estimate = max_factor / math.log(max_factor)
+        pairs_estimate = primes_estimate * (primes_estimate + 1) // 2
+        
+        print(f"INFO: {args.max_bits}-bit dataset will generate ~{int(pairs_estimate):,} pairs")
+        if args.max_bits >= 18:
+            print("WARNING: Large dataset - ensure sufficient disk space and time")
+    
+    try:
+        generate_dataset_optimized_fixed(
+            max_bits=args.max_bits,
+            output_dir=args.output_dir,
+            num_workers=args.workers,
+            batch_size=args.batch_size,
+            compression_level=args.compression_level
+        )
+    except KeyboardInterrupt:
+        print("\n⏹️ Interrupted by user.")
+        sys.exit(1)
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
