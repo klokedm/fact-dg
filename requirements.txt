@@ -3,6 +3,7 @@ numpy>=1.21.0
 datasets>=2.14.0
 pyarrow>=13.0.0
 tqdm>=4.65.0
+huggingface_hub>=0.16.4
 
 # Performance optimizations (highly recommended)
 numba>=0.57.0  # JIT compilation - massive speedup

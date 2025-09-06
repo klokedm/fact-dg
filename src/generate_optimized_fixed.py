@@ -20,6 +20,15 @@ from tqdm import tqdm
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+# HuggingFace Hub integration
+try:
+    from huggingface_hub import HfApi, upload_file
+    from datasets import load_dataset
+    HF_HUB_AVAILABLE = True
+except ImportError:
+    print("WARNING: HuggingFace Hub not available. Install with: pip install huggingface_hub")
+    HF_HUB_AVAILABLE = False
+
 # Performance optimizations
 try:
     from numba import jit, prange
@@ -577,9 +586,63 @@ def parquet_writer_process(write_queue: mp.Queue, output_path: str, schema: pa.S
         import traceback
         traceback.print_exc()
 
+
+def upload_to_huggingface(output_path: str, repo_name: str, max_bits: int) -> bool:
+    """
+    Upload the generated dataset to HuggingFace Hub.
+    
+    Args:
+        output_path: Path to the parquet file
+        repo_name: Name of the HuggingFace repository 
+        max_bits: Number of bits for dataset description
+        
+    Returns:
+        True if upload successful, False otherwise
+    """
+    if not HF_HUB_AVAILABLE:
+        print("ERROR: HuggingFace Hub not available. Cannot upload dataset.")
+        return False
+    
+    if not repo_name:
+        print("WARNING: No repo-name provided. Skipping upload.")
+        return False
+        
+    try:
+        print(f"\nUploading dataset to HuggingFace Hub: {repo_name}")
+        
+        # Load the dataset from the parquet file
+        dataset = load_dataset('parquet', data_files=output_path)
+        
+        # Create dataset description
+        dataset_info = {
+            "description": f"Synthetic math dataset with {max_bits}-bit prime factorization pairs",
+            "features": dataset['train'].features,
+            "num_rows": len(dataset['train'])
+        }
+        
+        print(f"Dataset info: {dataset_info['num_rows']:,} rows")
+        
+        # Push to hub with progress bar
+        dataset.push_to_hub(
+            repo_name, 
+            commit_message=f"Add {max_bits}-bit prime factorization dataset",
+            private=False  # Set to True if you want a private dataset
+        )
+        
+        print(f"✅ SUCCESS: Dataset uploaded to https://huggingface.co/datasets/{repo_name}")
+        return True
+        
+    except Exception as e:
+        print(f"ERROR: Failed to upload to HuggingFace Hub: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
 def generate_dataset_optimized_fixed(max_bits: int, output_dir: str = "data",
                                    repo_name: str = None, num_workers: int = None,
-                                   compression_level: int = 22, use_gpu: bool = False):
+                                   compression_level: int = 22, use_gpu: bool = False,
+                                   no_upload: bool = False):
     """Fixed optimized dataset generation with proper parallelization."""
     print(f"Generating OPTIMIZED dataset for {max_bits}-bit prime pairs...")
     print(f"Target repository: {repo_name}")
@@ -720,10 +783,35 @@ def generate_dataset_optimized_fixed(max_bits: int, output_dir: str = "data",
         print(f"Compression ratio: {compression_ratio:.1f}:1")
         print(f"Compression efficiency: {((1 - file_size_mb/estimated_uncompressed_mb) * 100):.1f}%")
         print(f"Final memory usage: {get_memory_usage()}")
+        
+        # Upload to HuggingFace Hub if repo_name is provided and upload not disabled
+        if repo_name and not no_upload:
+            upload_success = upload_to_huggingface(output_path, repo_name, max_bits)
+            if upload_success:
+                print("🚀 Dataset generation and upload completed successfully!")
+            else:
+                print("⚠️  Dataset generated successfully but upload failed.")
+        elif no_upload:
+            print("📁 Dataset generated successfully (upload skipped via --no-upload).")
+        else:
+            print("📁 Dataset generated successfully (no repo-name provided).")
+            
     except OSError as e:
         print(f"WARNING: Could not get file size: {e}")
         print(f"SUCCESS: Dataset saved successfully!")
         print(f"Final memory usage: {get_memory_usage()}")
+        
+        # Upload to HuggingFace Hub if repo_name is provided and upload not disabled
+        if repo_name and not no_upload:
+            upload_success = upload_to_huggingface(output_path, repo_name, max_bits)
+            if upload_success:
+                print("🚀 Dataset generation and upload completed successfully!")
+            else:
+                print("⚠️  Dataset generated successfully but upload failed.")
+        elif no_upload:
+            print("📁 Dataset generated successfully (upload skipped via --no-upload).")
+        else:
+            print("📁 Dataset generated successfully (no repo-name provided).")
 
 
 def create_dataset_features_optimized_fixed(max_bits: int) -> Features:
@@ -779,6 +867,8 @@ def main():
     parser.add_argument("--gpu", action="store_true", help="Enable GPU acceleration (requires CUDA)")
     parser.add_argument("--compression-level", type=int, default=22,
                        help="Zstd compression level (1-22, default: 22 for maximum compression)")
+    parser.add_argument("--no-upload", action="store_true", 
+                       help="Skip uploading to HuggingFace Hub (generate dataset file only)")
     
     args = parser.parse_args()
 
@@ -836,7 +926,8 @@ def main():
             repo_name=args.repo_name,
             num_workers=num_cores,
             compression_level=args.compression_level,
-            use_gpu=args.gpu
+            use_gpu=args.gpu,
+            no_upload=args.no_upload
         )
     except KeyboardInterrupt:
         print("\nINTERRUPTED: User interrupted execution.")
