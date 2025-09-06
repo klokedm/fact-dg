@@ -22,6 +22,31 @@ os.environ["TRANSFORMERS_CACHE"] = os.path.join(WORKSPACE_HF_CACHE, "transformer
 os.makedirs(WORKSPACE_HF_CACHE, exist_ok=True)
 os.makedirs(os.environ["HF_DATASETS_CACHE"], exist_ok=True)
 
+def copy_hf_token_to_workspace():
+    """Copy HuggingFace token from default location to workspace."""
+    default_token_path = os.path.expanduser("~/.cache/huggingface/token")
+    workspace_token_path = os.path.join(WORKSPACE_HF_CACHE, "token")
+    
+    # If workspace token already exists, use it
+    if os.path.exists(workspace_token_path):
+        return True
+    
+    # Try to copy from default location
+    if os.path.exists(default_token_path):
+        try:
+            import shutil
+            shutil.copy2(default_token_path, workspace_token_path)
+            print(f"✅ Copied HuggingFace token to workspace")
+            return True
+        except Exception as e:
+            print(f"⚠️ Could not copy token: {e}")
+            return False
+    
+    return False
+
+# Try to copy existing token to workspace
+copy_hf_token_to_workspace()
+
 try:
     from datasets import load_dataset
     from huggingface_hub import HfApi, login
@@ -37,6 +62,32 @@ def get_file_size_mb(file_path: str) -> float:
         return os.path.getsize(file_path) / (1024**2)
     except OSError:
         return 0.0
+
+def check_authentication():
+    """Check if HuggingFace authentication is working."""
+    try:
+        from huggingface_hub import whoami
+        user_info = whoami()
+        print(f"✅ Authenticated as: {user_info['name']}")
+        print(f"   Email: {user_info.get('email', 'Not provided')}")
+        print(f"   Token location: {os.path.join(WORKSPACE_HF_CACHE, 'token')}")
+        return True
+    except Exception as e:
+        print(f"❌ Authentication failed: {e}")
+        return False
+
+def login_to_workspace():
+    """Interactive login that saves token to workspace."""
+    try:
+        from huggingface_hub import login
+        print("🔑 Logging into HuggingFace...")
+        print("This will store your token in /workspace/.cache/huggingface/token")
+        login()
+        print("✅ Login successful!")
+        return check_authentication()
+    except Exception as e:
+        print(f"❌ Login failed: {e}")
+        return False
 
 def detect_dataset_info(parquet_path: str):
     """Extract dataset info from filename."""
@@ -139,6 +190,14 @@ def upload_dataset(parquet_path: str, repo_name: str, private: bool = True,
         print(f"\n❌ ERROR: Upload failed")
         print(f"Error details: {e}")
         
+        # Handle specific authentication errors
+        if "401" in str(e) or "Unauthorized" in str(e):
+            print(f"\n🔑 Authentication Error:")
+            print(f"   This looks like a token/login issue. Try:")
+            print(f"   1. python3 src/upload_to_hf.py --check-auth")
+            print(f"   2. python3 src/upload_to_hf.py --login")
+            print(f"   3. Or use: --token YOUR_HF_TOKEN")
+        
         # Provide helpful debugging info
         print(f"\n🔍 Debug Information:")
         print(f"   - Working directory: {os.getcwd()}")
@@ -162,6 +221,15 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  # Check if you're logged in
+  python3 upload_to_hf.py --check-auth
+  
+  # Login to HuggingFace (first time setup)
+  python3 upload_to_hf.py --login
+  
+  # List available datasets
+  python3 upload_to_hf.py --list
+
   # Upload private dataset
   python3 upload_to_hf.py data/prime_products_18bit_fast.parquet username/math-18
 
@@ -170,9 +238,6 @@ Examples:
   
   # Upload with specific token
   python3 upload_to_hf.py data/prime_products_20bit_fast.parquet username/math-20 --token YOUR_TOKEN
-
-  # List available datasets
-  python3 upload_to_hf.py --list
         """
     )
     
@@ -182,8 +247,24 @@ Examples:
     parser.add_argument("--token", type=str, help="HuggingFace token (if not logged in)")
     parser.add_argument("--list", action="store_true", help="List available parquet files in data/")
     parser.add_argument("--chunk-size", type=int, default=10000, help="Processing chunk size")
+    parser.add_argument("--login", action="store_true", help="Login to HuggingFace (stores token in workspace)")
+    parser.add_argument("--check-auth", action="store_true", help="Check authentication status")
     
     args = parser.parse_args()
+    
+    # Check authentication status
+    if args.check_auth:
+        print("🔍 Checking HuggingFace authentication...")
+        if check_authentication():
+            print("🎉 Ready to upload datasets!")
+        else:
+            print("💡 Run with --login to authenticate")
+        return
+    
+    # Login to HuggingFace
+    if args.login:
+        login_to_workspace()
+        return
     
     # List available datasets
     if args.list:
