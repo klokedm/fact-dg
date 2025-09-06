@@ -245,14 +245,11 @@ def compute_products_and_features(prime_pairs: List[Tuple[int, int]], primes: np
 # ============================================================================
 
 def generate_chunk_pairs(args):
-    """Worker function to generate pairs for a chunk of the first factor."""
-    primes, prime_features, start_i, end_i, max_bits, chunk_id = args
+    """Worker function to generate pairs for a chunk of prime pairs."""
+    pairs_chunk, primes, prime_features, max_bits, chunk_id = args
     
-    # Generate all pairs where first factor is in [start_i, end_i)
-    pairs = []
-    for i in range(start_i, min(end_i, len(primes))):
-        for j in range(i, len(primes)):  # j >= i for unique unordered pairs
-            pairs.append((i, j))
+    # pairs_chunk is already a list of (i, j) pairs to process
+    pairs = pairs_chunk
     
     if not pairs:
         return []
@@ -345,17 +342,27 @@ def generate_dataset_optimized_fixed(max_bits: int, output_dir: str = "data",
     def parallel_data_generator():
         """Parallel generator with proper load balancing."""
         
-        # Calculate chunk size for load balancing
-        chunk_size = max(1, num_primes // (num_workers * 4))  # Smaller chunks for better balance
+        # Generate all pairs first (memory efficient)
+        print("Pre-generating pair indices...")
+        all_pairs = []
+        for i in range(num_primes):
+            for j in range(i, num_primes):
+                all_pairs.append((i, j))
         
-        # Prepare worker arguments
+        print(f"Generated {len(all_pairs):,} pair indices")
+        
+        # Split pairs into chunks for parallel processing
+        pairs_per_chunk = max(1000, len(all_pairs) // (num_workers * 4))  # At least 1000 pairs per chunk
+        
         worker_args = []
-        for start_i in range(0, num_primes, chunk_size):
-            end_i = min(start_i + chunk_size, num_primes)
+        for chunk_start in range(0, len(all_pairs), pairs_per_chunk):
+            chunk_end = min(chunk_start + pairs_per_chunk, len(all_pairs))
+            pairs_chunk = all_pairs[chunk_start:chunk_end]
             chunk_id = len(worker_args)
-            worker_args.append((primes, prime_features, start_i, end_i, max_bits, chunk_id))
+            worker_args.append((pairs_chunk, primes, prime_features, max_bits, chunk_id))
         
         print(f"Processing {len(worker_args)} chunks with {num_workers} workers...")
+        print(f"Average pairs per chunk: {len(all_pairs) // len(worker_args):,}")
         
         # Process chunks in parallel
         with mp.Pool(num_workers) as pool:
@@ -366,9 +373,38 @@ def generate_dataset_optimized_fixed(max_bits: int, output_dir: str = "data",
                         yield record
                         pbar.update(1)
     
-    # Create dataset from generator
+    # Create dataset from generator with batching for memory efficiency
     print("Creating optimized dataset...")
-    dataset = Dataset.from_generator(parallel_data_generator, features=features)
+    
+    # Process in batches to avoid memory explosion
+    batch_size = 50000  # Process 50k records at a time
+    all_records = []
+    record_count = 0
+    
+    print("Processing data in batches to manage memory...")
+    for record in parallel_data_generator():
+        all_records.append(record)
+        record_count += 1
+        
+        # Process batch when it reaches batch_size
+        if len(all_records) >= batch_size:
+            if record_count == len(all_records):  # First batch
+                dataset = Dataset.from_list(all_records, features=features)
+            else:
+                batch_dataset = Dataset.from_list(all_records, features=features)
+                dataset = dataset.concatenate(batch_dataset)
+            
+            print(f"Processed {record_count:,} records, Memory: {get_memory_usage()}")
+            all_records = []  # Clear batch to free memory
+    
+    # Process remaining records
+    if all_records:
+        if record_count == len(all_records):  # Only one batch
+            dataset = Dataset.from_list(all_records, features=features)
+        else:
+            batch_dataset = Dataset.from_list(all_records, features=features)
+            dataset = dataset.concatenate(batch_dataset)
+        print(f"Final batch: {record_count:,} records, Memory: {get_memory_usage()}")
     
     # Save with maximum compression
     try:
