@@ -294,35 +294,64 @@ def compute_products_and_features(prime_pairs: List[Tuple[int, int]], primes: np
     product_dec_len = len(str(max_product))
     product_bin_len = max_bits * 2
     
-    # Extract products
-    products = np.array([primes[i] * primes[j] for i, j in prime_pairs], dtype=np.uint64)
+    # Check if we might have overflow issues
+    uint64_max = 2**64 - 1
+    if max_product > uint64_max:
+        print(f"  Warning: Products may exceed uint64 range ({max_product:,} > {uint64_max:,})")
+        print(f"  Using Python arbitrary precision integers for safety")
+    
+    # Extract products using Python integers to avoid overflow
+    # Convert to Python int first, then to appropriate numpy type
+    products_list = []
+    for i, j in prime_pairs:
+        # Use Python integers for multiplication to avoid overflow
+        product = int(primes[i]) * int(primes[j])
+        products_list.append(product)
+    
+    # Convert to numpy array with object dtype to handle large integers
+    products = np.array(products_list, dtype=object)
     
     # Decimal representations
     decimals = np.array([f'{p:0{product_dec_len}d}' for p in products])
     
     # Binary bit arrays with optional CUDA acceleration
     if CUPY_AVAILABLE and len(products) > 500:  # Use GPU for medium+ arrays
-        bits = cuda_int_to_bits_batch(products, product_bin_len)
+        # Convert to regular integers for CUDA processing
+        products_int = np.array([int(p) for p in products], dtype=np.uint64)
+        bits = cuda_int_to_bits_batch(products_int, product_bin_len)
     else:
-        bits = fast_int_to_bits_batch(products, product_bin_len)
+        # Convert object array to integers for bit processing
+        products_int = np.array([int(p) for p in products], dtype=np.uint64)
+        bits = fast_int_to_bits_batch(products_int, product_bin_len)
     
     # Mathematical features with optional CUDA acceleration
     if CUPY_AVAILABLE and len(products) > 500:
-        popcount = cuda_popcount_batch(products)
+        popcount = cuda_popcount_batch(products_int)
     else:
-        popcount = fast_popcount_batch(products)
+        popcount = fast_popcount_batch(products_int)
     
     bit_length = np.array([int(p).bit_length() for p in products], dtype=np.uint8)
-    trailing_zeros = fast_trailing_zeros_batch(products)
+    trailing_zeros = fast_trailing_zeros_batch(products_int)
     
     # Compute a and b values for p² = b² - a² formula with optional CUDA acceleration
     if CUPY_AVAILABLE and len(products) > 500:
-        a_values, b_values = cuda_mathematical_operations(products)
+        # Use the already converted products_int
+        a_values, b_values = cuda_mathematical_operations(products_int)
     else:
-        # CPU version
-        products_squared = products * products
-        a_values = (products_squared - 1) // 2
-        b_values = (products_squared + 1) // 2
+        # CPU version using Python integers to avoid overflow
+        a_values = []
+        b_values = []
+        for p in products:
+            p_int = int(p)  # Ensure it's a Python int
+            p_squared = p_int * p_int
+            a_val = (p_squared - 1) // 2
+            b_val = (p_squared + 1) // 2
+            a_values.append(a_val)
+            b_values.append(b_val)
+        
+        # Convert back to numpy arrays with object dtype
+        a_values = np.array(a_values, dtype=object)
+        b_values = np.array(b_values, dtype=object)
     
     # Decimal representations for a and b (same padding as product)
     a_decimals = np.array([f'{a:0{product_dec_len}d}' for a in a_values])
@@ -330,11 +359,17 @@ def compute_products_and_features(prime_pairs: List[Tuple[int, int]], primes: np
     
     # Binary representations for a and b with optional CUDA acceleration
     if CUPY_AVAILABLE and len(a_values) > 500:
-        a_bits = cuda_int_to_bits_batch(a_values, product_bin_len)
-        b_bits = cuda_int_to_bits_batch(b_values, product_bin_len)
+        # Convert to uint64 for CUDA processing (may overflow for very large values)
+        a_values_int = np.array([int(a) for a in a_values], dtype=np.uint64)
+        b_values_int = np.array([int(b) for b in b_values], dtype=np.uint64)
+        a_bits = cuda_int_to_bits_batch(a_values_int, product_bin_len)
+        b_bits = cuda_int_to_bits_batch(b_values_int, product_bin_len)
     else:
-        a_bits = fast_int_to_bits_batch(a_values, product_bin_len)
-        b_bits = fast_int_to_bits_batch(b_values, product_bin_len)
+        # Convert to uint64 for bit processing (may overflow for very large values)
+        a_values_int = np.array([int(a) for a in a_values], dtype=np.uint64)
+        b_values_int = np.array([int(b) for b in b_values], dtype=np.uint64)
+        a_bits = fast_int_to_bits_batch(a_values_int, product_bin_len)
+        b_bits = fast_int_to_bits_batch(b_values_int, product_bin_len)
     
     return {
         'decimals': decimals,
