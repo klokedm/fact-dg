@@ -30,9 +30,11 @@ except ImportError:
 # Performance optimizations
 try:
     from numba import jit, prange
+    import numba
     NUMBA_AVAILABLE = True
+    print(f"✅ Numba {numba.__version__} available")
 except ImportError:
-    print("WARNING: Numba not available. Install with: pip install numba")
+    print("⚠️ Numba not available. Install with: pip install numba")
     NUMBA_AVAILABLE = False
 
 try:
@@ -62,7 +64,7 @@ if NUMBA_AVAILABLE:
             # Create a properly typed empty array for Numba
             return np.empty(0, dtype=np.int32)
 
-        sieve = np.ones(max_num + 1, dtype=np.bool8)
+        sieve = np.ones(max_num + 1, dtype=bool)
         sieve[0] = sieve[1] = False
 
         for i in range(2, int(math.sqrt(max_num)) + 1):
@@ -305,7 +307,14 @@ def generate_dataset_fast(max_bits: int, output_dir: str = "data",
     print(f"Generating dataset for {max_bits}-bit prime pairs...")
     print(f"Target repository: {repo_name}")
     print(f"Compression level: {compression_level}")
-    print(f"Numba JIT: {'✅' if NUMBA_AVAILABLE else '❌'}")
+    if NUMBA_AVAILABLE:
+        try:
+            import numba
+            print(f"Numba JIT: ✅ ({numba.__version__})")
+        except:
+            print("Numba JIT: ✅")
+    else:
+        print("Numba JIT: ❌")
     
     # Set up workers
     if num_workers is None:
@@ -421,8 +430,17 @@ def main():
     parser.add_argument("--compression-level", type=int, default=22, help="Compression level (1-22)")
     parser.add_argument("--no-upload", action="store_true", help="Skip HuggingFace upload")
     parser.add_argument("--public", action="store_true", help="Make dataset public (default: private)")
-    
+    parser.add_argument("--no-numba", action="store_true", help="Disable Numba JIT compilation (use fallback)")
+    parser.add_argument("--test", action="store_true", help="Run a quick test with small dataset (8-bit)")
+
     args = parser.parse_args()
+
+    # Handle test mode
+    if args.test:
+        print("🧪 TEST MODE: Generating small 8-bit dataset...")
+        args.max_bits = 8
+        args.workers = 2
+        args.no_upload = True
     
     if args.max_bits < 1 or args.max_bits > 32:
         print("Error: max_bits must be between 1 and 32")
@@ -435,6 +453,11 @@ def main():
         pairs_estimate = primes_estimate * (primes_estimate + 1) // 2
         print(f"📊 Estimated {int(pairs_estimate):,} pairs for {args.max_bits}-bit dataset")
     
+    # Handle --no-numba option
+    if args.no_numba:
+        NUMBA_AVAILABLE = False
+        print("⚠️ Numba JIT disabled via --no-numba")
+
     try:
         generate_dataset_fast(
             max_bits=args.max_bits,
