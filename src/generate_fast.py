@@ -191,7 +191,7 @@ def create_parquet_schema(max_bits: int) -> pa.Schema:
         pa.field('b_bits', pa.list_(pa.uint8(), list_size=product_bin_len)),
         pa.field('pair_is_same', pa.bool_()),
         pa.field('pair_coprime', pa.bool_()),
-        pa.field('product_is_square', pa.bool())
+        pa.field('product_is_square', pa.bool_())
     ])
 
 def generate_chunk_fast(args) -> str:
