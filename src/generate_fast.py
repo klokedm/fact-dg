@@ -55,6 +55,20 @@ def get_memory_usage() -> str:
     except:
         return "Memory monitoring error"
 
+def calc_bit_length(num) -> int:
+    """Calculate bit length for any integer type (Python int, numpy int32, etc)."""
+    if num == 0:
+        return 0
+    
+    # Convert to Python int to ensure bit_length() works
+    if hasattr(num, 'item'):  # numpy scalar
+        num = int(num.item())
+    else:
+        num = int(num)
+    
+    # Use Python's built-in bit_length for regular integers
+    return num.bit_length()
+
 # Import optimized functions from the original script
 if NUMBA_AVAILABLE:
     @jit(nopython=True)
@@ -138,7 +152,7 @@ else:
             bits_array[i] = [int(b) for b in bit_str]
 
         popcount[:] = np.sum(bits_array, axis=1, dtype=np.uint8)
-        msb_index[:] = np.array([num.bit_length() - 1 if num > 0 else 0
+        msb_index[:] = np.array([calc_bit_length(num) - 1 if num > 0 else 0
                                 for num in numbers], dtype=np.uint8)
 
 def create_parquet_schema(max_bits: int) -> pa.Schema:
@@ -202,8 +216,8 @@ def generate_chunk_fast(args) -> str:
         product_bits = format(product, f'0{max_bits*2}b')
         product_bit_array = [int(b) for b in product_bits]
         product_popcount = sum(product_bit_array)
-        product_bit_length = product.bit_length()
-        product_trailing_zeros = (product & -product).bit_length() - 1 if product > 0 else 0
+        product_bit_length = calc_bit_length(product)
+        product_trailing_zeros = calc_bit_length(product & -product) - 1 if product > 0 else 0
         
         # a and b for p² = b² - a² formula  
         a = abs(p2 - p1) // 2
