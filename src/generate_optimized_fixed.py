@@ -11,10 +11,14 @@ import os
 import sys
 import math
 import multiprocessing as mp
+import threading
+import queue
 from typing import List, Dict, Any, Tuple, Optional
 import numpy as np
 from datasets import Dataset, Features, Value, Sequence
 from tqdm import tqdm
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 # Performance optimizations
 try:
@@ -286,7 +290,7 @@ def compute_prime_features_vectorized(primes: np.ndarray, max_bits: int) -> Dict
 
 
 def compute_products_and_features(prime_pairs: List[Tuple[int, int]], primes: np.ndarray, 
-                                max_bits: int) -> Dict[str, np.ndarray]:
+                                max_bits: int, use_gpu: bool = False) -> Dict[str, np.ndarray]:
     """Compute products and their features for a batch of prime pairs."""
     
     max_factor = 2**max_bits - 1
@@ -327,13 +331,14 @@ def compute_products_and_features(prime_pairs: List[Tuple[int, int]], primes: np
         products_int = products
     
     # Binary bit arrays with optional CUDA acceleration
-    if CUPY_AVAILABLE and len(products) > 500:  # Use GPU for medium+ arrays
+    gpu_available = use_gpu and hasattr(generate_chunk_pairs, '_gpu_initialized') and globals().get('WORKER_CUPY_AVAILABLE', False)
+    if gpu_available and len(products) > 500:  # Use GPU for medium+ arrays
         bits = cuda_int_to_bits_batch(products_int, product_bin_len)
     else:
         bits = fast_int_to_bits_batch(products_int, product_bin_len)
     
     # Mathematical features with optional CUDA acceleration
-    if CUPY_AVAILABLE and len(products) > 500:
+    if gpu_available and len(products) > 500:
         popcount = cuda_popcount_batch(products_int)
     else:
         popcount = fast_popcount_batch(products_int)
@@ -342,7 +347,7 @@ def compute_products_and_features(prime_pairs: List[Tuple[int, int]], primes: np
     trailing_zeros = fast_trailing_zeros_batch(products_int)
     
     # Compute a and b values for p² = b² - a² formula with optional CUDA acceleration
-    if CUPY_AVAILABLE and len(products) > 500:
+    if gpu_available and len(products) > 500:
         # Use the already converted products_int
         a_values, b_values = cuda_mathematical_operations(products_int)
     else:
@@ -378,7 +383,7 @@ def compute_products_and_features(prime_pairs: List[Tuple[int, int]], primes: np
         a_values_int = a_values
         b_values_int = b_values
     
-    if CUPY_AVAILABLE and len(a_values) > 500:
+    if gpu_available and len(a_values) > 500:
         a_bits = cuda_int_to_bits_batch(a_values_int, product_bin_len)
         b_bits = cuda_int_to_bits_batch(b_values_int, product_bin_len)
     else:
@@ -402,9 +407,24 @@ def compute_products_and_features(prime_pairs: List[Tuple[int, int]], primes: np
 # PARALLEL WORKER FUNCTIONS
 # ============================================================================
 
+def init_worker_gpu(use_gpu):
+    """Initialize GPU in worker process if requested."""
+    global WORKER_CUPY_AVAILABLE
+    if use_gpu:
+        try:
+            import cupy as cp
+            WORKER_CUPY_AVAILABLE = cp.cuda.is_available()
+            if WORKER_CUPY_AVAILABLE:
+                # Initialize CUDA context
+                cp.cuda.runtime.getDeviceCount()
+        except ImportError:
+            WORKER_CUPY_AVAILABLE = False
+    else:
+        WORKER_CUPY_AVAILABLE = False
+
 def generate_chunk_pairs(args):
     """Worker function to generate pairs for a chunk of prime pairs."""
-    pairs_chunk, primes, prime_features, max_bits, chunk_id = args
+    pairs_chunk, primes, prime_features, max_bits, chunk_id, use_gpu = args
     
     # pairs_chunk is already a list of (i, j) pairs to process
     pairs = pairs_chunk
@@ -412,8 +432,13 @@ def generate_chunk_pairs(args):
     if not pairs:
         return []
     
+    # Initialize GPU in worker if not done yet
+    if not hasattr(generate_chunk_pairs, '_gpu_initialized'):
+        init_worker_gpu(use_gpu)
+        generate_chunk_pairs._gpu_initialized = True
+    
     # Compute product features for this chunk
-    product_features = compute_products_and_features(pairs, primes, max_bits)
+    product_features = compute_products_and_features(pairs, primes, max_bits, use_gpu)
     
     # Build records
     records = []
@@ -462,9 +487,99 @@ def generate_chunk_pairs(args):
 # MAIN OPTIMIZED GENERATION FUNCTION
 # ============================================================================
 
+def create_parquet_schema(max_bits: int) -> pa.Schema:
+    """Create PyArrow schema for the dataset."""
+    factor_bin_len = max_bits
+    product_bin_len = max_bits * 2
+    
+    return pa.schema([
+        # Factor 1
+        ('factor1_dec', pa.string()),
+        ('factor1_bits', pa.list_(pa.uint8(), factor_bin_len)),
+        ('factor1_is_prime', pa.bool_()),
+        ('factor1_is_odd', pa.bool_()),
+        ('factor1_popcount', pa.uint8()),
+        ('factor1_msb_index', pa.uint8()),
+        
+        # Factor 2
+        ('factor2_dec', pa.string()),
+        ('factor2_bits', pa.list_(pa.uint8(), factor_bin_len)),
+        ('factor2_is_prime', pa.bool_()),
+        ('factor2_is_odd', pa.bool_()),
+        ('factor2_popcount', pa.uint8()),
+        ('factor2_msb_index', pa.uint8()),
+        
+        # Product
+        ('product_dec', pa.string()),
+        ('product_bits', pa.list_(pa.uint8(), product_bin_len)),
+        ('product_popcount', pa.uint8()),
+        ('product_bit_length', pa.uint8()),
+        ('product_trailing_zeros', pa.uint8()),
+        
+        # a and b values
+        ('a_dec', pa.string()),
+        ('a_bits', pa.list_(pa.uint8(), product_bin_len)),
+        ('b_dec', pa.string()),
+        ('b_bits', pa.list_(pa.uint8(), product_bin_len)),
+        
+        # Pair-level
+        ('pair_is_same', pa.bool_()),
+        ('pair_coprime', pa.bool_()),
+        ('product_is_square', pa.bool_())
+    ])
+
+def parquet_writer_process(write_queue: mp.Queue, output_path: str, schema: pa.Schema, 
+                          compression_level: int, total_pairs: int):
+    """Dedicated process for writing parquet files."""
+    try:
+        # Create parquet writer
+        writer = pq.ParquetWriter(output_path, schema, compression='zstd', 
+                                 compression_level=compression_level)
+        
+        written_count = 0
+        batch_size = 10000  # Write in smaller batches to reduce memory
+        batch_records = []
+        
+        with tqdm(total=total_pairs, desc="Writing parquet", unit="records", position=1) as pbar:
+            while True:
+                try:
+                    item = write_queue.get(timeout=30)
+                    if item is None:  # Sentinel to stop
+                        break
+                    
+                    batch_records.append(item)
+                    written_count += 1
+                    pbar.update(1)
+                    
+                    # Write batch when full
+                    if len(batch_records) >= batch_size:
+                        table = pa.Table.from_pylist(batch_records, schema=schema)
+                        writer.write_table(table)
+                        batch_records = []
+                        
+                except queue.Empty:
+                    print("Writer timeout - no data received")
+                    break
+                except Exception as e:
+                    print(f"Writer error: {e}")
+                    break
+            
+            # Write remaining records
+            if batch_records:
+                table = pa.Table.from_pylist(batch_records, schema=schema)
+                writer.write_table(table)
+        
+        writer.close()
+        print(f"Parquet writer finished: {written_count:,} records written")
+        
+    except Exception as e:
+        print(f"Parquet writer process error: {e}")
+        import traceback
+        traceback.print_exc()
+
 def generate_dataset_optimized_fixed(max_bits: int, output_dir: str = "data",
                                    repo_name: str = None, num_workers: int = None,
-                                   compression_level: int = 22):
+                                   compression_level: int = 22, use_gpu: bool = False):
     """Fixed optimized dataset generation with proper parallelization."""
     print(f"Generating OPTIMIZED dataset for {max_bits}-bit prime pairs...")
     print(f"Target repository: {repo_name}")
@@ -472,14 +587,18 @@ def generate_dataset_optimized_fixed(max_bits: int, output_dir: str = "data",
     
     # Show optimization status
     print(f"Numba JIT: {'[OK]' if NUMBA_AVAILABLE else '[NO]'}")
-    print(f"CUDA GPU: {'[OK]' if CUPY_AVAILABLE else '[NO]'}")
+    print(f"CUDA GPU: {'[OK]' if CUPY_AVAILABLE and use_gpu else '[NO]'}")
     print(f"Multiprocessing: [OK]")
     print(f"Memory monitoring: {'[OK]' if PSUTIL_AVAILABLE else '[NO]'}")
     
-    # Set up workers
+    # Set up workers - use fewer workers for GPU to avoid contention
     if num_workers is None:
-        num_workers = max(1, mp.cpu_count() - 1)
-        print(f"Using {num_workers} worker processes (auto-detected)")
+        if use_gpu:
+            num_workers = min(2, mp.cpu_count())  # Limit GPU workers
+            print(f"Using {num_workers} worker processes (GPU mode)")
+        else:
+            num_workers = max(1, mp.cpu_count() - 1)
+            print(f"Using {num_workers} worker processes (CPU mode)")
     else:
         print(f"Using {num_workers} worker processes (user-specified)")
     
@@ -500,10 +619,20 @@ def generate_dataset_optimized_fixed(max_bits: int, output_dir: str = "data",
     prime_features = compute_prime_features_vectorized(primes, max_bits)
     print(f"Memory usage: {get_memory_usage()}")
     
-    # Create dataset features schema
-    features = create_dataset_features_optimized_fixed(max_bits)
+    # Create parquet schema
+    schema = create_parquet_schema(max_bits)
     
-    # Generate data using parallel processing
+    # Set up output path
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(output_dir, f"prime_products_{max_bits}bit_optimized_fixed.parquet")
+    
+    # Create write queue and start writer process
+    write_queue = mp.Queue(maxsize=50000)  # Bounded queue to control memory
+    writer_process = mp.Process(target=parquet_writer_process, 
+                               args=(write_queue, output_path, schema, compression_level, total_pairs))
+    writer_process.start()
+    
+    # Generate data using parallel processing with streaming
     def parallel_data_generator():
         """Parallel generator with proper load balancing."""
         
@@ -540,84 +669,44 @@ def generate_dataset_optimized_fixed(max_bits: int, output_dir: str = "data",
                 if pair_idx >= end_pair_idx:
                     break
             
-            worker_args.append((chunk_pairs, primes, prime_features, max_bits, chunk_id))
+            worker_args.append((chunk_pairs, primes, prime_features, max_bits, chunk_id, use_gpu))
             pairs_assigned += len(chunk_pairs)
         
         print(f"Created {len(worker_args)} chunks with ~{pairs_per_chunk:,} pairs each")
         print(f"Starting parallel processing with {num_workers} workers...")
         
+        # Set multiprocessing start method for GPU compatibility
+        if use_gpu:
+            mp.set_start_method('spawn', force=True)
+        
         # Process chunks in parallel with better progress tracking
         with mp.Pool(num_workers) as pool:
             # Use imap_unordered for better performance
-            with tqdm(total=total_pairs, desc="Processing pairs", unit="pairs") as pbar:
+            with tqdm(total=total_pairs, desc="Processing pairs", unit="pairs", position=0) as pbar:
                 for chunk_records in pool.imap_unordered(generate_chunk_pairs, worker_args):
                     for record in chunk_records:
-                        yield record
+                        # Send to writer process
+                        write_queue.put(record)
                         pbar.update(1)
-    
-    # Create dataset using streaming to avoid memory issues
-    print("Creating dataset with streaming approach...")
-    
-    # Write directly to parquet in chunks to avoid memory issues
-    os.makedirs(output_dir, exist_ok=True)
-    output_path = os.path.join(output_dir, f"prime_products_{max_bits}bit_optimized_fixed.parquet")
-    
-    print(f"Writing dataset directly to {output_path}...")
-    
-    # Collect data in batches and write to parquet
-    batch_size = 100000  # Process 100k records at a time
-    batch_records = []
-    total_written = 0
-    
-    try:
-        for record in parallel_data_generator():
-            batch_records.append(record)
-            
-            if len(batch_records) >= batch_size:
-                # Create batch dataset and write/append to parquet
-                batch_dataset = Dataset.from_list(batch_records, features=features)
-                
-                if total_written == 0:
-                    # First batch - create new file
-                    batch_dataset.to_parquet(output_path, compression="zstd", compression_level=compression_level)
-                else:
-                    # Subsequent batches - append to existing file
-                    # Note: HuggingFace datasets doesn't support append, so we use a workaround
-                    temp_path = output_path + f".batch_{total_written}"
-                    batch_dataset.to_parquet(temp_path, compression="zstd", compression_level=compression_level)
-                
-                total_written += len(batch_records)
-                print(f"Written {total_written:,} records, Memory: {get_memory_usage()}")
-                batch_records = []  # Clear batch
-                
-        # Write final batch
-        if batch_records:
-            batch_dataset = Dataset.from_list(batch_records, features=features)
-            if total_written == 0:
-                batch_dataset.to_parquet(output_path, compression="zstd", compression_level=compression_level)
-            else:
-                temp_path = output_path + f".batch_{total_written}"
-                batch_dataset.to_parquet(temp_path, compression="zstd", compression_level=compression_level)
-            total_written += len(batch_records)
-            
-        print(f"Dataset generation complete! Total records: {total_written:,}")
         
-        # If we wrote multiple batches, we need to combine them
-        if total_written > batch_size:
-            print("Combining batch files...")
-            # Load and combine all batches
-            dataset = Dataset.load_from_disk(output_path)
-            batch_num = batch_size
-            while os.path.exists(output_path + f".batch_{batch_num}"):
-                batch_dataset = Dataset.load_from_disk(output_path + f".batch_{batch_num}")
-                dataset = dataset.concatenate(batch_dataset)
-                os.remove(output_path + f".batch_{batch_num}")
-                batch_num += batch_size
-                
-    except Exception as e:
-        print(f"ERROR during dataset creation: {e}")
-        raise
+        # Signal writer to stop
+        write_queue.put(None)
     
+    # Start data generation
+    try:
+        parallel_data_generator()
+        
+        # Wait for writer to finish
+        writer_process.join()
+        
+        if writer_process.exitcode != 0:
+            print(f"Writer process failed with exit code: {writer_process.exitcode}")
+            
+    except Exception as e:
+        print(f"Error during data generation: {e}")
+        write_queue.put(None)  # Signal writer to stop
+        writer_process.join()
+        raise
     
     # Show results
     try:
@@ -626,7 +715,7 @@ def generate_dataset_optimized_fixed(max_bits: int, output_dir: str = "data",
         compression_ratio = estimated_uncompressed_mb / file_size_mb if file_size_mb > 0 else 0
 
         print(f"SUCCESS: Dataset saved successfully!")
-        print(f"Rows: {len(dataset):,}")
+        print(f"File: {output_path}")
         print(f"File size: {file_size_mb:.2f} MB")
         print(f"Compression ratio: {compression_ratio:.1f}:1")
         print(f"Compression efficiency: {((1 - file_size_mb/estimated_uncompressed_mb) * 100):.1f}%")
@@ -634,7 +723,6 @@ def generate_dataset_optimized_fixed(max_bits: int, output_dir: str = "data",
     except OSError as e:
         print(f"WARNING: Could not get file size: {e}")
         print(f"SUCCESS: Dataset saved successfully!")
-        print(f"Rows: {len(dataset):,}")
         print(f"Final memory usage: {get_memory_usage()}")
 
 
@@ -688,6 +776,7 @@ def main():
     parser.add_argument("--repo-name", type=str, required=True, help="Name of the repository where dataset should be pushed")
     parser.add_argument("--workers", type=int, default=None, help="Number of worker processes (deprecated, use --cores)")
     parser.add_argument("--cores", type=int, default=None, help="Number of CPU cores to use (default: auto-detect)")
+    parser.add_argument("--gpu", action="store_true", help="Enable GPU acceleration (requires CUDA)")
     parser.add_argument("--compression-level", type=int, default=22,
                        help="Zstd compression level (1-22, default: 22 for maximum compression)")
     
@@ -746,7 +835,8 @@ def main():
             output_dir=args.output_dir,
             repo_name=args.repo_name,
             num_workers=num_cores,
-            compression_level=args.compression_level
+            compression_level=args.compression_level,
+            use_gpu=args.gpu
         )
     except KeyboardInterrupt:
         print("\nINTERRUPTED: User interrupted execution.")
