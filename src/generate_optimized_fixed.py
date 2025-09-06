@@ -458,83 +458,117 @@ def generate_dataset_optimized_fixed(max_bits: int, output_dir: str = "data",
     def parallel_data_generator():
         """Parallel generator with proper load balancing."""
         
-        # Generate all pairs first (memory efficient)
-        print("Pre-generating pair indices...")
-        all_pairs = []
-        for i in range(num_primes):
-            for j in range(i, num_primes):
-                all_pairs.append((i, j))
+        # Calculate optimal chunk size
+        pairs_per_chunk = max(50000, total_pairs // (num_workers * 8))
+        num_chunks = (total_pairs + pairs_per_chunk - 1) // pairs_per_chunk
         
-        print(f"Generated {len(all_pairs):,} pair indices")
+        print(f"Splitting {total_pairs:,} pairs into {num_chunks} chunks (~{pairs_per_chunk:,} pairs/chunk)")
         
-        # Split pairs into chunks for parallel processing
-        pairs_per_chunk = max(1000, len(all_pairs) // (num_workers * 4))  # At least 1000 pairs per chunk
-        
+        # Generate chunks using index ranges instead of storing pairs
         worker_args = []
-        for chunk_start in range(0, len(all_pairs), pairs_per_chunk):
-            chunk_end = min(chunk_start + pairs_per_chunk, len(all_pairs))
-            pairs_chunk = all_pairs[chunk_start:chunk_end]
-            chunk_id = len(worker_args)
-            worker_args.append((pairs_chunk, primes, prime_features, max_bits, chunk_id))
+        chunk_id = 0
+        pairs_assigned = 0
         
-        print(f"Processing {len(worker_args)} chunks with {num_workers} workers...")
-        print(f"Average pairs per chunk: {len(all_pairs) // len(worker_args):,}")
+        # Use a more efficient chunking strategy
+        for chunk_id in range(num_chunks):
+            # Calculate which pairs belong to this chunk
+            start_pair_idx = chunk_id * pairs_per_chunk
+            end_pair_idx = min((chunk_id + 1) * pairs_per_chunk, total_pairs)
+            chunk_size = end_pair_idx - start_pair_idx
+            
+            # Convert pair indices to actual (i,j) pairs for this chunk
+            chunk_pairs = []
+            pair_idx = 0
+            
+            # Efficiently find the pairs for this chunk
+            for i in range(num_primes):
+                for j in range(i, num_primes):
+                    if pair_idx >= start_pair_idx and pair_idx < end_pair_idx:
+                        chunk_pairs.append((i, j))
+                    pair_idx += 1
+                    if pair_idx >= end_pair_idx:
+                        break
+                if pair_idx >= end_pair_idx:
+                    break
+            
+            worker_args.append((chunk_pairs, primes, prime_features, max_bits, chunk_id))
+            pairs_assigned += len(chunk_pairs)
         
-        # Process chunks in parallel
+        print(f"Created {len(worker_args)} chunks with ~{pairs_per_chunk:,} pairs each")
+        print(f"Starting parallel processing with {num_workers} workers...")
+        
+        # Process chunks in parallel with better progress tracking
         with mp.Pool(num_workers) as pool:
-            # Use imap for progress tracking
-            with tqdm(total=total_pairs, desc="Generating pairs", unit="pairs") as pbar:
-                for chunk_records in pool.imap(generate_chunk_pairs, worker_args):
+            # Use imap_unordered for better performance
+            with tqdm(total=total_pairs, desc="Processing pairs", unit="pairs") as pbar:
+                for chunk_records in pool.imap_unordered(generate_chunk_pairs, worker_args):
                     for record in chunk_records:
                         yield record
                         pbar.update(1)
     
-    # Create dataset from generator with batching for memory efficiency
-    print("Creating optimized dataset...")
+    # Create dataset using streaming to avoid memory issues
+    print("Creating dataset with streaming approach...")
     
-    # Process in batches to avoid memory explosion
-    batch_size = 50000  # Process 50k records at a time
-    all_records = []
-    record_count = 0
+    # Write directly to parquet in chunks to avoid memory issues
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(output_dir, f"prime_products_{max_bits}bit_optimized_fixed.parquet")
     
-    print("Processing data in batches to manage memory...")
-    for record in parallel_data_generator():
-        all_records.append(record)
-        record_count += 1
-        
-        # Process batch when it reaches batch_size
-        if len(all_records) >= batch_size:
-            if record_count == len(all_records):  # First batch
-                dataset = Dataset.from_list(all_records, features=features)
-            else:
-                batch_dataset = Dataset.from_list(all_records, features=features)
-                dataset = dataset.concatenate(batch_dataset)
-            
-            print(f"Processed {record_count:,} records, Memory: {get_memory_usage()}")
-            all_records = []  # Clear batch to free memory
+    print(f"Writing dataset directly to {output_path}...")
     
-    # Process remaining records
-    if all_records:
-        if record_count == len(all_records):  # Only one batch
-            dataset = Dataset.from_list(all_records, features=features)
-        else:
-            batch_dataset = Dataset.from_list(all_records, features=features)
-            dataset = dataset.concatenate(batch_dataset)
-        print(f"Final batch: {record_count:,} records, Memory: {get_memory_usage()}")
+    # Collect data in batches and write to parquet
+    batch_size = 100000  # Process 100k records at a time
+    batch_records = []
+    total_written = 0
     
-    # Save with maximum compression
     try:
-        os.makedirs(output_dir, exist_ok=True)
-        output_path = os.path.join(output_dir, f"prime_products_{max_bits}bit_optimized_fixed.parquet")
-
-        print(f"Saving to {output_path} with compression level {compression_level}...")
-        dataset.to_parquet(output_path, compression="zstd", compression_level=compression_level)
-    except OSError as e:
-        print(f"ERROR: Creating output directory or file: {e}")
-        raise
+        for record in parallel_data_generator():
+            batch_records.append(record)
+            
+            if len(batch_records) >= batch_size:
+                # Create batch dataset and write/append to parquet
+                batch_dataset = Dataset.from_list(batch_records, features=features)
+                
+                if total_written == 0:
+                    # First batch - create new file
+                    batch_dataset.to_parquet(output_path, compression="zstd", compression_level=compression_level)
+                else:
+                    # Subsequent batches - append to existing file
+                    # Note: HuggingFace datasets doesn't support append, so we use a workaround
+                    temp_path = output_path + f".batch_{total_written}"
+                    batch_dataset.to_parquet(temp_path, compression="zstd", compression_level=compression_level)
+                
+                total_written += len(batch_records)
+                print(f"Written {total_written:,} records, Memory: {get_memory_usage()}")
+                batch_records = []  # Clear batch
+                
+        # Write final batch
+        if batch_records:
+            batch_dataset = Dataset.from_list(batch_records, features=features)
+            if total_written == 0:
+                batch_dataset.to_parquet(output_path, compression="zstd", compression_level=compression_level)
+            else:
+                temp_path = output_path + f".batch_{total_written}"
+                batch_dataset.to_parquet(temp_path, compression="zstd", compression_level=compression_level)
+            total_written += len(batch_records)
+            
+        print(f"Dataset generation complete! Total records: {total_written:,}")
+        
+        # If we wrote multiple batches, we need to combine them
+        if total_written > batch_size:
+            print("Combining batch files...")
+            # Load and combine all batches
+            dataset = Dataset.load_from_disk(output_path)
+            batch_num = batch_size
+            while os.path.exists(output_path + f".batch_{batch_num}"):
+                batch_dataset = Dataset.load_from_disk(output_path + f".batch_{batch_num}")
+                dataset = dataset.concatenate(batch_dataset)
+                os.remove(output_path + f".batch_{batch_num}")
+                batch_num += batch_size
+                
     except Exception as e:
-        print(f"ERROR: Saving dataset: {e}")
+        print(f"ERROR during dataset creation: {e}")
         raise
+    
     
     # Show results
     try:
