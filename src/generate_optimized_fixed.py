@@ -319,14 +319,17 @@ def compute_products_and_features(prime_pairs: List[Tuple[int, int]], primes: np
     # Decimal representations
     decimals = np.array([f'{p:0{product_dec_len}d}' for p in products])
     
+    # Ensure we have a consistent integer array for bit operations
+    if products.dtype == object:
+        # Convert object array to uint64 for bit operations (may truncate very large values)
+        products_int = np.array([int(p) & ((1 << 64) - 1) for p in products], dtype=np.uint64)
+    else:
+        products_int = products
+    
     # Binary bit arrays with optional CUDA acceleration
     if CUPY_AVAILABLE and len(products) > 500:  # Use GPU for medium+ arrays
-        # Convert to regular integers for CUDA processing
-        products_int = np.array([int(p) for p in products], dtype=np.uint64)
         bits = cuda_int_to_bits_batch(products_int, product_bin_len)
     else:
-        # Convert object array to integers for bit processing
-        products_int = np.array([int(p) for p in products], dtype=np.uint64)
         bits = fast_int_to_bits_batch(products_int, product_bin_len)
     
     # Mathematical features with optional CUDA acceleration
@@ -354,25 +357,31 @@ def compute_products_and_features(prime_pairs: List[Tuple[int, int]], primes: np
             a_values.append(a_val)
             b_values.append(b_val)
         
-        # Convert back to numpy arrays with object dtype
-        a_values = np.array(a_values, dtype=object)
-        b_values = np.array(b_values, dtype=object)
+        # Try to use uint64, fall back to object if needed
+        try:
+            a_values = np.array(a_values, dtype=np.uint64)
+            b_values = np.array(b_values, dtype=np.uint64)
+        except OverflowError:
+            a_values = np.array(a_values, dtype=object)
+            b_values = np.array(b_values, dtype=object)
     
     # Decimal representations for a and b (same padding as product)
     a_decimals = np.array([f'{a:0{product_dec_len}d}' for a in a_values])
     b_decimals = np.array([f'{b:0{product_dec_len}d}' for b in b_values])
     
     # Binary representations for a and b with optional CUDA acceleration
+    # Ensure we have uint64 arrays for bit operations
+    if a_values.dtype == object:
+        a_values_int = np.array([int(a) & ((1 << 64) - 1) for a in a_values], dtype=np.uint64)
+        b_values_int = np.array([int(b) & ((1 << 64) - 1) for b in b_values], dtype=np.uint64)
+    else:
+        a_values_int = a_values
+        b_values_int = b_values
+    
     if CUPY_AVAILABLE and len(a_values) > 500:
-        # Convert to uint64 for CUDA processing (may overflow for very large values)
-        a_values_int = np.array([int(a) for a in a_values], dtype=np.uint64)
-        b_values_int = np.array([int(b) for b in b_values], dtype=np.uint64)
         a_bits = cuda_int_to_bits_batch(a_values_int, product_bin_len)
         b_bits = cuda_int_to_bits_batch(b_values_int, product_bin_len)
     else:
-        # Convert to uint64 for bit processing (may overflow for very large values)
-        a_values_int = np.array([int(a) for a in a_values], dtype=np.uint64)
-        b_values_int = np.array([int(b) for b in b_values], dtype=np.uint64)
         a_bits = fast_int_to_bits_batch(a_values_int, product_bin_len)
         b_bits = fast_int_to_bits_batch(b_values_int, product_bin_len)
     
