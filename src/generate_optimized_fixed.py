@@ -587,7 +587,7 @@ def parquet_writer_process(write_queue: mp.Queue, output_path: str, schema: pa.S
         traceback.print_exc()
 
 
-def upload_to_huggingface(output_path: str, repo_name: str, max_bits: int) -> bool:
+def upload_to_huggingface(output_path: str, repo_name: str, max_bits: int, is_private: bool = True) -> bool:
     """
     Upload the generated dataset to HuggingFace Hub.
     
@@ -595,6 +595,7 @@ def upload_to_huggingface(output_path: str, repo_name: str, max_bits: int) -> bo
         output_path: Path to the parquet file
         repo_name: Name of the HuggingFace repository 
         max_bits: Number of bits for dataset description
+        is_private: Whether to make the dataset private (default: True)
         
     Returns:
         True if upload successful, False otherwise
@@ -626,10 +627,11 @@ def upload_to_huggingface(output_path: str, repo_name: str, max_bits: int) -> bo
         dataset.push_to_hub(
             repo_name, 
             commit_message=f"Add {max_bits}-bit prime factorization dataset",
-            private=False  # Set to True if you want a private dataset
+            private=is_private
         )
         
-        print(f"✅ SUCCESS: Dataset uploaded to https://huggingface.co/datasets/{repo_name}")
+        visibility = "private" if is_private else "public"
+        print(f"✅ SUCCESS: Dataset uploaded as {visibility} to https://huggingface.co/datasets/{repo_name}")
         return True
         
     except Exception as e:
@@ -642,7 +644,7 @@ def upload_to_huggingface(output_path: str, repo_name: str, max_bits: int) -> bo
 def generate_dataset_optimized_fixed(max_bits: int, output_dir: str = "data",
                                    repo_name: str = None, num_workers: int = None,
                                    compression_level: int = 22, use_gpu: bool = False,
-                                   no_upload: bool = False):
+                                   no_upload: bool = False, is_public: bool = False):
     """Fixed optimized dataset generation with proper parallelization."""
     print(f"Generating OPTIMIZED dataset for {max_bits}-bit prime pairs...")
     print(f"Target repository: {repo_name}")
@@ -786,7 +788,7 @@ def generate_dataset_optimized_fixed(max_bits: int, output_dir: str = "data",
         
         # Upload to HuggingFace Hub if repo_name is provided and upload not disabled
         if repo_name and not no_upload:
-            upload_success = upload_to_huggingface(output_path, repo_name, max_bits)
+            upload_success = upload_to_huggingface(output_path, repo_name, max_bits, is_private=not is_public)
             if upload_success:
                 print("🚀 Dataset generation and upload completed successfully!")
             else:
@@ -803,7 +805,7 @@ def generate_dataset_optimized_fixed(max_bits: int, output_dir: str = "data",
         
         # Upload to HuggingFace Hub if repo_name is provided and upload not disabled
         if repo_name and not no_upload:
-            upload_success = upload_to_huggingface(output_path, repo_name, max_bits)
+            upload_success = upload_to_huggingface(output_path, repo_name, max_bits, is_private=not is_public)
             if upload_success:
                 print("🚀 Dataset generation and upload completed successfully!")
             else:
@@ -869,6 +871,8 @@ def main():
                        help="Zstd compression level (1-22, default: 22 for maximum compression)")
     parser.add_argument("--no-upload", action="store_true", 
                        help="Skip uploading to HuggingFace Hub (generate dataset file only)")
+    parser.add_argument("--public", action="store_true",
+                       help="Make the HuggingFace dataset public (default is private)")
     
     args = parser.parse_args()
 
@@ -927,7 +931,8 @@ def main():
             num_workers=num_cores,
             compression_level=args.compression_level,
             use_gpu=args.gpu,
-            no_upload=args.no_upload
+            no_upload=args.no_upload,
+            is_public=args.public
         )
     except KeyboardInterrupt:
         print("\nINTERRUPTED: User interrupted execution.")
