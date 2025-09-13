@@ -301,28 +301,108 @@ def upload_dataset(parquet_path: str, repo_name: str, private: bool = True,
         print(f"\n❌ ERROR: Upload failed")
         print(f"Error details: {e}")
         
-        # Handle specific authentication errors
-        if "401" in str(e) or "Unauthorized" in str(e):
+        # Print full traceback for detailed debugging
+        import traceback
+        print(f"\n🔍 Full Error Traceback:")
+        print("=" * 60)
+        traceback.print_exc()
+        print("=" * 60)
+        
+        # Handle specific error types
+        error_str = str(e).lower()
+        
+        # Authentication errors
+        if "401" in error_str or "unauthorized" in error_str:
             print(f"\n🔑 Authentication Error:")
             print(f"   This looks like a token/login issue. Try:")
             print(f"   1. python3 src/upload_to_hf.py --check-auth")
             print(f"   2. python3 src/upload_to_hf.py --login")
             print(f"   3. Or use: --token YOUR_HF_TOKEN")
         
+        # Memory errors
+        elif "memory" in error_str or "out of memory" in error_str:
+            print(f"\n🧠 Memory Error:")
+            print(f"   The dataset is too large to load into memory. Try:")
+            print(f"   1. Use a machine with more RAM")
+            print(f"   2. Split the parquet file into smaller chunks")
+            print(f"   3. Enable streaming mode (dataset loading)")
+        
+        # Disk space errors
+        elif "no space" in error_str or "disk full" in error_str:
+            print(f"\n💾 Disk Space Error:")
+            print(f"   Not enough disk space. Try:")
+            print(f"   1. Free up space in /workspace")
+            print(f"   2. Use a machine with more storage")
+            print(f"   3. Clean up HuggingFace cache: rm -rf /workspace/.cache/huggingface")
+        
+        # Network/connection errors
+        elif "connection" in error_str or "network" in error_str or "timeout" in error_str:
+            print(f"\n🌐 Network Error:")
+            print(f"   Network connection issue. Try:")
+            print(f"   1. Check your internet connection")
+            print(f"   2. Retry the upload (it may resume from where it left off)")
+            print(f"   3. Use smaller chunk sizes: --chunk-size 5000")
+        
+        # Dataset loading/parsing errors
+        elif "generating" in error_str or "dataset" in error_str:
+            print(f"\n📊 Dataset Loading Error:")
+            print(f"   Issue loading or parsing the parquet file. Try:")
+            print(f"   1. Check if the parquet file is corrupted")
+            print(f"   2. Verify the file format and schema")
+            print(f"   3. Try loading a smaller sample first")
+            print(f"   4. Check if you have permission to read the file")
+        
+        # Repository errors
+        elif "repo" in error_str or "repository" in error_str:
+            print(f"\n📦 Repository Error:")
+            print(f"   Issue with the target repository. Try:")
+            print(f"   1. Check if the repository name format is correct (username/dataset-name)")
+            print(f"   2. Verify you have write access to this repository")
+            print(f"   3. Check if the repository already exists and has conflicts")
+        
         # Provide helpful debugging info
         print(f"\n🔍 Debug Information:")
         print(f"   - Working directory: {os.getcwd()}")
         print(f"   - HF Cache dir exists: {os.path.exists(WORKSPACE_HF_CACHE)}")
         print(f"   - HF Cache writable: {os.access(WORKSPACE_HF_CACHE, os.W_OK)}")
+        print(f"   - Parquet file exists: {os.path.exists(parquet_path)}")
+        print(f"   - Parquet file readable: {os.access(parquet_path, os.R_OK)}")
         print(f"   - Parquet file size: {get_file_size_mb(parquet_path):.1f} MB")
         
         # Check if it's a space issue
         try:
             import shutil
-            free_space_gb = shutil.disk_usage("/workspace")[2] / (1024**3)
+            total, used, free = shutil.disk_usage("/workspace")
+            free_space_gb = free / (1024**3)
+            total_space_gb = total / (1024**3)
+            used_space_gb = used / (1024**3)
             print(f"   - Free space in /workspace: {free_space_gb:.1f} GB")
-        except:
-            print(f"   - Could not check free space")
+            print(f"   - Total space in /workspace: {total_space_gb:.1f} GB")
+            print(f"   - Used space in /workspace: {used_space_gb:.1f} GB")
+        except Exception as disk_e:
+            print(f"   - Could not check disk space: {disk_e}")
+        
+        # Check parquet file details
+        try:
+            import pandas as pd
+            print(f"   - Attempting to read parquet file with pandas...")
+            df = pd.read_parquet(parquet_path, engine='pyarrow')
+            print(f"   - Parquet file readable: {len(df):,} rows, {len(df.columns)} columns")
+            print(f"   - Columns: {list(df.columns)}")
+            print(f"   - Memory usage: {df.memory_usage(deep=True).sum() / (1024**2):.1f} MB")
+        except Exception as pd_e:
+            print(f"   - Could not read parquet with pandas: {pd_e}")
+        
+        # Check Python and library versions
+        try:
+            import sys
+            import datasets
+            import huggingface_hub
+            print(f"   - Python version: {sys.version}")
+            print(f"   - datasets version: {datasets.__version__}")
+            print(f"   - huggingface_hub version: {huggingface_hub.__version__}")
+        except Exception as version_e:
+            print(f"   - Could not get version info: {version_e}")
             
         return False
 
