@@ -10,6 +10,7 @@ import argparse
 import os
 import sys
 from pathlib import Path
+from typing import Tuple
 
 # Force HuggingFace to use workspace for all cache/temp files
 WORKSPACE_HF_CACHE = "/workspace/.cache/huggingface"
@@ -163,7 +164,7 @@ def login_to_workspace():
         print(f"❌ Login failed: {e}")
         return False
 
-def clean_hf_cache(cache_dir: str = None) -> tuple[bool, str]:
+def clean_hf_cache(cache_dir: str = None) -> Tuple[bool, str]:
     """Clean HuggingFace cache to free up disk space."""
     if cache_dir is None:
         cache_dir = os.environ.get("HF_DATASETS_CACHE", WORKSPACE_HF_CACHE)
