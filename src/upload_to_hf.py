@@ -27,9 +27,14 @@ def copy_hf_token_to_workspace():
     """Copy HuggingFace token from default location to workspace."""
     default_token_path = os.path.expanduser("~/.cache/huggingface/token")
     workspace_token_path = os.path.join(WORKSPACE_HF_CACHE, "token")
+    custom_token_path = "/workspace/home/token"
     
     # If workspace token already exists, use it
     if os.path.exists(workspace_token_path):
+        return True
+    
+    # Check if custom workspace token exists
+    if os.path.exists(custom_token_path):
         return True
     
     # Try to copy from default location
@@ -143,27 +148,59 @@ def check_authentication():
     try:
         from huggingface_hub import whoami, get_token
         
-        # Check token availability
-        token = get_token()
+        # Check multiple token sources
+        token = None
+        token_source = None
+        
+        # 1. Try standard HF locations
+        try:
+            token = get_token()
+            if token:
+                token_source = "standard HuggingFace location"
+        except:
+            pass
+        
+        # 2. Try custom workspace location
+        if not token:
+            workspace_token_file = "/workspace/home/token"
+            if os.path.exists(workspace_token_file):
+                try:
+                    with open(workspace_token_file, 'r') as f:
+                        token = f.read().strip()
+                    token_source = workspace_token_file
+                except:
+                    pass
+        
+        # 3. Try environment variable
+        if not token:
+            token = os.environ.get('HF_TOKEN')
+            if token:
+                token_source = "HF_TOKEN environment variable"
+        
         if token:
             print(f"✅ Token found: {token[:10]}...{token[-4:] if len(token) > 14 else token}")
+            print(f"   Source: {token_source}")
         else:
-            print(f"❌ No token found")
+            print(f"❌ No token found in any location")
             
         # Check whoami
-        user_info = whoami(token=token)
-        print(f"✅ Authenticated as: {user_info['name']}")
-        print(f"   Email: {user_info.get('email', 'Not provided')}")
+        if token:
+            user_info = whoami(token=token)
+            print(f"✅ Authenticated as: {user_info['name']}")
+            print(f"   Email: {user_info.get('email', 'Not provided')}")
         
-        # Check token locations
+        # Check all token locations
         default_token_path = os.path.expanduser("~/.cache/huggingface/token")
         workspace_token_path = os.path.join(WORKSPACE_HF_CACHE, "token")
+        custom_token_path = "/workspace/home/token"
         
-        print(f"   Token locations:")
+        print(f"   Token file locations:")
         print(f"   - Default: {default_token_path} {'✅' if os.path.exists(default_token_path) else '❌'}")
         print(f"   - Workspace: {workspace_token_path} {'✅' if os.path.exists(workspace_token_path) else '❌'}")
+        print(f"   - Custom: {custom_token_path} {'✅' if os.path.exists(custom_token_path) else '❌'}")
+        print(f"   - Environment: HF_TOKEN {'✅' if os.environ.get('HF_TOKEN') else '❌'}")
         
-        return True
+        return bool(token)
     except Exception as e:
         print(f"❌ Authentication failed: {e}")
         return False
@@ -293,15 +330,36 @@ def direct_upload_parquet(parquet_path: str, repo_name: str, private: bool = Tru
             login(token=token)
             auth_token = token
         else:
-            # Try to get existing token
+            # Try multiple token sources
             try:
+                # 1. Try standard HF locations
                 auth_token = get_token()
                 if auth_token:
-                    print(f"✅ Using existing HuggingFace authentication")
-                else:
-                    print(f"❌ No authentication token found")
+                    print(f"✅ Using existing HuggingFace authentication (standard location)")
+                
+                # 2. Try custom workspace location
+                if not auth_token:
+                    workspace_token_file = "/workspace/home/token"
+                    if os.path.exists(workspace_token_file):
+                        with open(workspace_token_file, 'r') as f:
+                            auth_token = f.read().strip()
+                        print(f"✅ Using HuggingFace token from {workspace_token_file}")
+                
+                # 3. Try environment variable
+                if not auth_token:
+                    auth_token = os.environ.get('HF_TOKEN')
+                    if auth_token:
+                        print(f"✅ Using HuggingFace token from HF_TOKEN environment variable")
+                
+                if not auth_token:
+                    print(f"❌ No authentication token found in any location:")
+                    print(f"   - Standard: ~/.cache/huggingface/token")
+                    print(f"   - Workspace: /workspace/.cache/huggingface/token") 
+                    print(f"   - Custom: /workspace/home/token")
+                    print(f"   - Environment: HF_TOKEN")
                     print(f"   Run: python3 src/upload_to_hf.py --login")
                     return False
+                    
             except Exception as e:
                 print(f"❌ Could not get authentication token: {e}")
                 print(f"   Run: python3 src/upload_to_hf.py --login")
@@ -494,10 +552,32 @@ def upload_dataset(parquet_path: str, repo_name: str, private: bool = True,
             print("Logging in with provided token...")
             login(token=token)
         else:
-            # Check if already authenticated
+            # Check if already authenticated (check multiple locations)
             try:
                 from huggingface_hub import get_token
-                existing_token = get_token()
+                
+                existing_token = None
+                
+                # 1. Try standard HF locations
+                try:
+                    existing_token = get_token()
+                except:
+                    pass
+                
+                # 2. Try custom workspace location
+                if not existing_token:
+                    workspace_token_file = "/workspace/home/token"
+                    if os.path.exists(workspace_token_file):
+                        try:
+                            with open(workspace_token_file, 'r') as f:
+                                existing_token = f.read().strip()
+                        except:
+                            pass
+                
+                # 3. Try environment variable
+                if not existing_token:
+                    existing_token = os.environ.get('HF_TOKEN')
+                
                 if not existing_token:
                     print("❌ No authentication found")
                     print("   Run: python3 src/upload_to_hf.py --login")
@@ -505,6 +585,9 @@ def upload_dataset(parquet_path: str, repo_name: str, private: bool = True,
                     return False
                 else:
                     print("✅ Using existing HuggingFace authentication")
+                    # Set the token for datasets library usage
+                    os.environ['HF_TOKEN'] = existing_token
+                    
             except Exception as e:
                 print(f"⚠️ Could not check authentication: {e}")
                 # Continue anyway - datasets library might handle it
