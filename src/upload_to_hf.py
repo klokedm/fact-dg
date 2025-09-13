@@ -163,6 +163,173 @@ def login_to_workspace():
         print(f"❌ Login failed: {e}")
         return False
 
+def clean_hf_cache(cache_dir: str = None) -> tuple[bool, str]:
+    """Clean HuggingFace cache to free up disk space."""
+    if cache_dir is None:
+        cache_dir = os.environ.get("HF_DATASETS_CACHE", WORKSPACE_HF_CACHE)
+    
+    try:
+        import shutil
+        
+        if not os.path.exists(cache_dir):
+            return True, "Cache directory doesn't exist - nothing to clean"
+        
+        # Calculate current cache size
+        def get_dir_size(path):
+            total = 0
+            try:
+                for dirpath, dirnames, filenames in os.walk(path):
+                    for f in filenames:
+                        fp = os.path.join(dirpath, f)
+                        if os.path.exists(fp):
+                            total += os.path.getsize(fp)
+            except (OSError, PermissionError):
+                pass
+            return total
+        
+        cache_size_mb = get_dir_size(cache_dir) / (1024**2)
+        
+        # Remove cache contents
+        for item in os.listdir(cache_dir):
+            item_path = os.path.join(cache_dir, item)
+            try:
+                if os.path.isdir(item_path):
+                    shutil.rmtree(item_path)
+                else:
+                    os.unlink(item_path)
+            except (OSError, PermissionError) as e:
+                print(f"⚠️ Could not remove {item_path}: {e}")
+        
+        return True, f"Freed {cache_size_mb:.1f} MB from cache"
+        
+    except Exception as e:
+        return False, f"Cache cleanup failed: {e}"
+
+def create_dataset_card(dataset_info: dict, parquet_path: str) -> str:
+    """Create a basic dataset card for direct upload."""
+    filename = os.path.basename(parquet_path)
+    file_size_mb = get_file_size_mb(parquet_path)
+    
+    return f"""---
+license: mit
+dataset_info:
+  features:
+  - name: input
+    dtype: string
+  - name: output  
+    dtype: string
+  config_name: default
+  splits:
+  - name: train
+    num_examples: unknown
+task_categories:
+- text-generation
+- question-answering
+language:
+- en
+tags:
+- math
+- prime-factorization
+- synthetic
+size_categories:
+- 100M<n<1B
+---
+
+# {dataset_info['description']}
+
+This dataset contains {dataset_info['bits']}-bit prime factorization pairs for mathematical training.
+
+## Dataset Details
+
+- **Original file:** {filename}  
+- **File size:** {file_size_mb:.1f} MB
+- **Format:** Parquet
+- **Columns:** input (composite number), output (prime factors)
+- **Upload method:** Direct upload (preserves original data exactly)
+
+## Usage
+
+```python
+from datasets import load_dataset
+
+dataset = load_dataset("{{repo_name}}")
+```
+
+## Data Format
+
+Each row contains:
+- `input`: A composite number (product of two primes)
+- `output`: The prime factorization in the format "p * q"
+"""
+
+def direct_upload_parquet(parquet_path: str, repo_name: str, private: bool = True, 
+                         token: str = None) -> bool:
+    """Upload parquet file directly using HuggingFace Hub API."""
+    try:
+        from huggingface_hub import HfApi, login
+        
+        # Login if token provided
+        if token:
+            login(token=token)
+        
+        # Initialize API
+        api = HfApi()
+        
+        print(f"\n📁 Creating repository: {repo_name}")
+        
+        # Create repository
+        try:
+            api.create_repo(
+                repo_id=repo_name,
+                repo_type="dataset",
+                private=private,
+                exist_ok=True  # Don't fail if repo already exists
+            )
+            print(f"✅ Repository created/verified")
+        except Exception as e:
+            if "already exists" in str(e).lower():
+                print(f"✅ Repository already exists, proceeding with upload")
+            else:
+                raise e
+        
+        # Get dataset info for metadata
+        dataset_info = detect_dataset_info(parquet_path)
+        
+        # Create dataset card
+        dataset_card = create_dataset_card(dataset_info, parquet_path).replace("{{repo_name}}", repo_name)
+        
+        print(f"\n☁️  Uploading files to {repo_name}...")
+        
+        # Upload parquet file
+        filename = os.path.basename(parquet_path)
+        print(f"   📄 Uploading {filename}...")
+        
+        api.upload_file(
+            path_or_fileobj=parquet_path,
+            path_in_repo=f"train-00000-of-00001.parquet",  # Standard HF naming
+            repo_id=repo_name,
+            repo_type="dataset",
+            commit_message=f"Add {dataset_info['bits']}-bit prime factorization dataset"
+        )
+        print(f"   ✅ Parquet file uploaded")
+        
+        # Upload dataset card/README
+        print(f"   📄 Uploading README.md...")
+        api.upload_file(
+            path_or_fileobj=dataset_card.encode('utf-8'),
+            path_in_repo="README.md",
+            repo_id=repo_name,
+            repo_type="dataset",
+            commit_message="Add dataset card"
+        )
+        print(f"   ✅ Dataset card uploaded")
+        
+        return True
+        
+    except Exception as e:
+        print(f"\n❌ Direct upload failed: {e}")
+        return False
+
 def detect_dataset_info(parquet_path: str):
     """Extract dataset info from filename."""
     filename = os.path.basename(parquet_path)
@@ -191,7 +358,8 @@ def detect_dataset_info(parquet_path: str):
     }
 
 def upload_dataset(parquet_path: str, repo_name: str, private: bool = True, 
-                  token: str = None, chunk_size: int = 10000, use_xet: bool = None):
+                  token: str = None, chunk_size: int = 10000, use_xet: bool = None,
+                  streaming: bool = False, clean_cache: bool = False, direct_upload: bool = False):
     """
     Upload parquet dataset to HuggingFace Hub with proper workspace handling.
     
@@ -202,6 +370,9 @@ def upload_dataset(parquet_path: str, repo_name: str, private: bool = True,
         token: HuggingFace token (if not already logged in)
         chunk_size: Chunk size for processing (smaller = less memory)
         use_xet: Whether to use Xet for upload (None = auto-detect)
+        streaming: Use streaming mode to avoid disk space issues (recommended for large files)
+        clean_cache: Clean HuggingFace cache before upload to free space
+        direct_upload: Upload parquet file directly without datasets library (fastest, minimal resources)
     """
     
     if not os.path.exists(parquet_path):
@@ -212,8 +383,32 @@ def upload_dataset(parquet_path: str, repo_name: str, private: bool = True,
     print(f"File size: {get_file_size_mb(parquet_path):.2f} MB")
     print(f"Target repository: {repo_name}")
     print(f"Privacy: {'Private' if private else 'Public'}")
-    print(f"HF Cache directory: {WORKSPACE_HF_CACHE}")
-    print(f"Datasets Cache: {os.environ['HF_DATASETS_CACHE']}")
+    
+    # Determine upload mode
+    if direct_upload:
+        upload_mode = "Direct Upload"
+        mode_desc = "(fastest, minimal resources, no processing)"
+    elif streaming:
+        upload_mode = "Streaming"
+        mode_desc = "(saves disk space, processes through datasets library)"
+    else:
+        upload_mode = "Standard"
+        mode_desc = "(creates cache files, full validation)"
+    
+    print(f"Upload mode: {upload_mode} {mode_desc}")
+    
+    if not direct_upload:
+        print(f"HF Cache directory: {WORKSPACE_HF_CACHE}")
+        print(f"Datasets Cache: {os.environ['HF_DATASETS_CACHE']}")
+    
+    # Clean cache if requested
+    if clean_cache:
+        print(f"🧹 Cleaning HuggingFace cache...")
+        cache_success, cache_msg = clean_hf_cache()
+        if cache_success:
+            print(f"✅ {cache_msg}")
+        else:
+            print(f"❌ {cache_msg}")
     
     # Detect dataset information
     dataset_info = detect_dataset_info(parquet_path)
@@ -260,23 +455,64 @@ def upload_dataset(parquet_path: str, repo_name: str, private: bool = True,
         print("Logging in with provided token...")
         login(token=token)
     
-    try:
-        print(f"\n📖 Loading dataset from {parquet_path}...")
-        print("This may take a few minutes for large files...")
+    # Handle direct upload (bypass datasets library entirely)
+    if direct_upload:
+        print(f"\n⚡ Using direct upload (fastest method)")
+        print(f"   - No data processing or validation")
+        print(f"   - Minimal memory and disk usage")
+        print(f"   - Preserves original parquet format exactly")
         
-        # Load dataset with workspace caching
-        dataset = load_dataset(
-            'parquet', 
-            data_files=parquet_path,
-            cache_dir=os.environ["HF_DATASETS_CACHE"],
-            # Use streaming for very large datasets to save memory
-            streaming=False  # Set to True for enormous datasets
+        success = direct_upload_parquet(
+            parquet_path=parquet_path,
+            repo_name=repo_name,
+            private=private,
+            token=token
         )
         
-        print(f"✅ Dataset loaded successfully")
-        print(f"   - Total rows: {len(dataset['train']):,}")
-        print(f"   - Features: {len(dataset['train'].features)}")
-        print(f"   - Sample features: {list(dataset['train'].features.keys())[:5]}...")
+        if success:
+            visibility = "private" if private else "public"
+            print(f"\n✅ SUCCESS: Dataset uploaded as {visibility} via direct upload")
+            print(f"   📡 URL: https://huggingface.co/datasets/{repo_name}")
+            print(f"   📊 File: {os.path.basename(parquet_path)} ({get_file_size_mb(parquet_path):.1f} MB)")
+            print(f"   ⚡ Total time: seconds (no processing required)")
+            
+        return success
+    
+    # Standard/streaming upload using datasets library
+    try:
+        if streaming:
+            print(f"\n📖 Loading dataset in streaming mode from {parquet_path}...")
+            print("Streaming mode: minimal disk space usage, direct upload")
+            
+            # Load dataset in streaming mode - saves massive amounts of disk space
+            dataset = load_dataset(
+                'parquet', 
+                data_files=parquet_path,
+                streaming=True  # This avoids creating cache files!
+            )
+            
+            print(f"✅ Dataset loaded in streaming mode")
+            print(f"   - Features: {len(dataset['train'].features)}")
+            print(f"   - Sample features: {list(dataset['train'].features.keys())[:5]}...")
+            # Note: Can't get exact row count in streaming mode without iterating
+            
+        else:
+            print(f"\n📖 Loading dataset from {parquet_path}...")
+            print("This may take a few minutes for large files...")
+            print("⚠️  Standard mode creates cache files (2-3x file size)")
+            
+            # Load dataset with workspace caching
+            dataset = load_dataset(
+                'parquet', 
+                data_files=parquet_path,
+                cache_dir=os.environ["HF_DATASETS_CACHE"],
+                streaming=False
+            )
+            
+            print(f"✅ Dataset loaded successfully")
+            print(f"   - Total rows: {len(dataset['train']):,}")
+            print(f"   - Features: {len(dataset['train'].features)}")
+            print(f"   - Sample features: {list(dataset['train'].features.keys())[:5]}...")
         
         print(f"\n☁️  Uploading to HuggingFace Hub: {repo_name}")
         print("This will take a while for large datasets...")
@@ -293,7 +529,12 @@ def upload_dataset(parquet_path: str, repo_name: str, private: bool = True,
         visibility = "private" if private else "public"
         print(f"✅ SUCCESS: Dataset uploaded as {visibility}")
         print(f"   📡 URL: https://huggingface.co/datasets/{repo_name}")
-        print(f"   📊 Rows: {len(dataset['train']):,}")
+        
+        # Show row count if available (not available in streaming mode)
+        if not streaming:
+            print(f"   📊 Rows: {len(dataset['train']):,}")
+        else:
+            print(f"   📊 Rows: Large dataset (exact count not shown in streaming mode)")
         
         return True
         
@@ -327,13 +568,16 @@ def upload_dataset(parquet_path: str, repo_name: str, private: bool = True,
             print(f"   2. Split the parquet file into smaller chunks")
             print(f"   3. Enable streaming mode (dataset loading)")
         
-        # Disk space errors
-        elif "no space" in error_str or "disk full" in error_str:
-            print(f"\n💾 Disk Space Error:")
-            print(f"   Not enough disk space. Try:")
-            print(f"   1. Free up space in /workspace")
-            print(f"   2. Use a machine with more storage")
-            print(f"   3. Clean up HuggingFace cache: rm -rf /workspace/.cache/huggingface")
+        # Disk space/quota errors
+        elif ("no space" in error_str or "disk full" in error_str or 
+              "disk quota exceeded" in error_str or "errno 122" in error_str):
+            print(f"\n💾 Disk Quota/Space Error:")
+            print(f"   Hit disk quota limit during dataset processing. Try:")
+            print(f"   1. Use streaming mode: --streaming (avoids cache files)")
+            print(f"   2. Clean cache first: --clean-cache")
+            print(f"   3. Use both: --streaming --clean-cache")
+            print(f"   4. Contact admin to increase disk quota")
+            print(f"   💡 The HuggingFace datasets library creates cache files 2-3x larger than the original")
         
         # Network/connection errors
         elif "connection" in error_str or "network" in error_str or "timeout" in error_str:
@@ -426,6 +670,9 @@ Examples:
   
   # List available datasets
   python3 upload_to_hf.py --list
+  
+  # Clean HuggingFace cache to free disk space
+  python3 upload_to_hf.py --clean-cache
 
   # Upload private dataset (auto-detects Xet)
   python3 upload_to_hf.py data/prime_products_18bit_fast.parquet username/math-18
@@ -436,11 +683,20 @@ Examples:
   # Upload without Xet (standard method)
   python3 upload_to_hf.py data/prime_products_18bit_fast.parquet username/math-18 --no-xet
 
-  # Upload public dataset  
-  python3 upload_to_hf.py data/prime_products_16bit_fast.parquet username/math-16 --public --xet
+  # Upload with direct mode (fastest, no processing, minimal resources)
+  python3 upload_to_hf.py data/prime_products_20bit_fast.parquet username/math-20 --direct
+
+  # Upload with streaming mode (saves disk space, avoids quota issues)
+  python3 upload_to_hf.py data/prime_products_20bit_fast.parquet username/math-20 --streaming
+
+  # Clean cache and upload with direct mode (recommended for large files)
+  python3 upload_to_hf.py data/prime_products_20bit_fast.parquet username/math-20 --direct --clean-cache
+
+  # Upload public dataset with direct upload
+  python3 upload_to_hf.py data/prime_products_16bit_fast.parquet username/math-16 --public --direct
   
-  # Upload with specific token
-  python3 upload_to_hf.py data/prime_products_20bit_fast.parquet username/math-20 --token YOUR_TOKEN --xet
+  # Upload with specific token and direct mode
+  python3 upload_to_hf.py data/prime_products_20bit_fast.parquet username/math-20 --token YOUR_TOKEN --direct
         """
     )
     
@@ -456,12 +712,22 @@ Examples:
     parser.add_argument("--no-xet", action="store_true", help="Force disable Xet, use standard uploads")
     parser.add_argument("--check-xet", action="store_true", help="Check Xet availability and status")
     parser.add_argument("--install-xet", action="store_true", help="Install Xet support for HuggingFace Hub")
+    parser.add_argument("--streaming", action="store_true", help="Use streaming mode (saves disk space, avoids quota issues)")
+    parser.add_argument("--clean-cache", action="store_true", help="Clean HuggingFace cache before upload to free space")
+    parser.add_argument("--direct", action="store_true", help="Direct upload (fastest, minimal resources, no processing)")
     
     args = parser.parse_args()
     
-    # Handle conflicting Xet flags
+    # Handle conflicting flags
     if args.xet and args.no_xet:
         parser.error("Cannot use both --xet and --no-xet flags")
+    
+    # Direct upload conflicts with other processing modes
+    if args.direct and args.streaming:
+        parser.error("Cannot use both --direct and --streaming (direct upload doesn't use datasets library)")
+    
+    if args.direct and (args.xet or args.no_xet):
+        parser.error("Xet flags not applicable with --direct upload (bypasses datasets library)")
     
     # Check Xet status
     if args.check_xet:
@@ -491,6 +757,16 @@ Examples:
     # Login to HuggingFace
     if args.login:
         login_to_workspace()
+        return
+    
+    # Clean cache only
+    if args.clean_cache and not args.parquet_file:
+        print("🧹 Cleaning HuggingFace cache...")
+        cache_success, cache_msg = clean_hf_cache()
+        if cache_success:
+            print(f"✅ {cache_msg}")
+        else:
+            print(f"❌ {cache_msg}")
         return
     
     # List available datasets
@@ -550,7 +826,10 @@ Examples:
             private=not args.public,
             token=args.token,
             chunk_size=args.chunk_size,
-            use_xet=use_xet
+            use_xet=use_xet,
+            streaming=args.streaming,
+            clean_cache=args.clean_cache,
+            direct_upload=args.direct
         )
         
         if success:
