@@ -141,11 +141,28 @@ def print_xet_status():
 def check_authentication():
     """Check if HuggingFace authentication is working."""
     try:
-        from huggingface_hub import whoami
-        user_info = whoami()
+        from huggingface_hub import whoami, get_token
+        
+        # Check token availability
+        token = get_token()
+        if token:
+            print(f"✅ Token found: {token[:10]}...{token[-4:] if len(token) > 14 else token}")
+        else:
+            print(f"❌ No token found")
+            
+        # Check whoami
+        user_info = whoami(token=token)
         print(f"✅ Authenticated as: {user_info['name']}")
         print(f"   Email: {user_info.get('email', 'Not provided')}")
-        print(f"   Token location: {os.path.join(WORKSPACE_HF_CACHE, 'token')}")
+        
+        # Check token locations
+        default_token_path = os.path.expanduser("~/.cache/huggingface/token")
+        workspace_token_path = os.path.join(WORKSPACE_HF_CACHE, "token")
+        
+        print(f"   Token locations:")
+        print(f"   - Default: {default_token_path} {'✅' if os.path.exists(default_token_path) else '❌'}")
+        print(f"   - Workspace: {workspace_token_path} {'✅' if os.path.exists(workspace_token_path) else '❌'}")
+        
         return True
     except Exception as e:
         print(f"❌ Authentication failed: {e}")
@@ -267,14 +284,31 @@ def direct_upload_parquet(parquet_path: str, repo_name: str, private: bool = Tru
                          token: str = None) -> bool:
     """Upload parquet file directly using HuggingFace Hub API."""
     try:
-        from huggingface_hub import HfApi, login
+        from huggingface_hub import HfApi, login, get_token
         
-        # Login if token provided
+        # Handle authentication
+        auth_token = None
         if token:
+            # Explicit token provided
             login(token=token)
+            auth_token = token
+        else:
+            # Try to get existing token
+            try:
+                auth_token = get_token()
+                if auth_token:
+                    print(f"✅ Using existing HuggingFace authentication")
+                else:
+                    print(f"❌ No authentication token found")
+                    print(f"   Run: python3 src/upload_to_hf.py --login")
+                    return False
+            except Exception as e:
+                print(f"❌ Could not get authentication token: {e}")
+                print(f"   Run: python3 src/upload_to_hf.py --login")
+                return False
         
-        # Initialize API
-        api = HfApi()
+        # Initialize API with token
+        api = HfApi(token=auth_token)
         
         print(f"\n📁 Creating repository: {repo_name}")
         
@@ -284,7 +318,8 @@ def direct_upload_parquet(parquet_path: str, repo_name: str, private: bool = Tru
                 repo_id=repo_name,
                 repo_type="dataset",
                 private=private,
-                exist_ok=True  # Don't fail if repo already exists
+                exist_ok=True,  # Don't fail if repo already exists
+                token=auth_token
             )
             print(f"✅ Repository created/verified")
         except Exception as e:
@@ -310,7 +345,8 @@ def direct_upload_parquet(parquet_path: str, repo_name: str, private: bool = Tru
             path_in_repo=f"train-00000-of-00001.parquet",  # Standard HF naming
             repo_id=repo_name,
             repo_type="dataset",
-            commit_message=f"Add {dataset_info['bits']}-bit prime factorization dataset"
+            commit_message=f"Add {dataset_info['bits']}-bit prime factorization dataset",
+            token=auth_token
         )
         print(f"   ✅ Parquet file uploaded")
         
@@ -321,7 +357,8 @@ def direct_upload_parquet(parquet_path: str, repo_name: str, private: bool = Tru
             path_in_repo="README.md",
             repo_id=repo_name,
             repo_type="dataset",
-            commit_message="Add dataset card"
+            commit_message="Add dataset card",
+            token=auth_token
         )
         print(f"   ✅ Dataset card uploaded")
         
@@ -451,10 +488,26 @@ def upload_dataset(parquet_path: str, repo_name: str, private: bool = True,
         except Exception:
             pass  # Don't fail on repo status check
     
-    # Login if token provided
-    if token:
-        print("Logging in with provided token...")
-        login(token=token)
+    # Handle authentication for non-direct uploads
+    if not direct_upload:
+        if token:
+            print("Logging in with provided token...")
+            login(token=token)
+        else:
+            # Check if already authenticated
+            try:
+                from huggingface_hub import get_token
+                existing_token = get_token()
+                if not existing_token:
+                    print("❌ No authentication found")
+                    print("   Run: python3 src/upload_to_hf.py --login")
+                    print("   Or use: --token YOUR_HF_TOKEN")
+                    return False
+                else:
+                    print("✅ Using existing HuggingFace authentication")
+            except Exception as e:
+                print(f"⚠️ Could not check authentication: {e}")
+                # Continue anyway - datasets library might handle it
     
     # Handle direct upload (bypass datasets library entirely)
     if direct_upload:
